@@ -129,36 +129,46 @@ class TelegramBot:
             log.error("TELEGRAM_BOT_TOKEN is not set – Telegram bot will not start.")
             return
 
-        self._app = (
-            ApplicationBuilder()
-            .token(settings.TELEGRAM_BOT_TOKEN)
-            .build()
-        )
+        try:
+            self._app = (
+                ApplicationBuilder()
+                .token(settings.TELEGRAM_BOT_TOKEN)
+                .build()
+            )
 
-        # Register handlers
-        self._register_handlers()
+            # Register handlers
+            self._register_handlers()
 
-        # Set bot command menu
-        await self._app.bot.set_my_commands(self._COMMANDS)
+            # Set bot command menu
+            await self._app.bot.set_my_commands(self._COMMANDS)
 
-        log.info("Telegram bot initialising...")
-        await self._app.initialize()
-        await self._app.start()
-        await self._app.updater.start_polling(drop_pending_updates=True)
-        log.info("Telegram bot is online.")
+            log.info("Telegram bot initialising...")
+            await self._app.initialize()
+            await self._app.start()
+            await self._app.updater.start_polling(drop_pending_updates=True)
+            log.info("Telegram bot is online.")
+        except Exception as e:
+            log.error(f"Failed to start Telegram bot: {e}")
 
     async def stop(self) -> None:
         if self._app:
-            await self._app.updater.stop()
-            await self._app.stop()
-            await self._app.shutdown()
-            log.info("Telegram bot stopped.")
+            try:
+                await self._app.updater.stop()
+                await self._app.stop()
+                await self._app.shutdown()
+                log.info("Telegram bot stopped.")
+            except Exception as e:
+                log.error(f"Error during Telegram bot shutdown: {e}")
 
     # ------------------------------------------------------------------
     # Handler registration
     # ------------------------------------------------------------------
 
     def _register_handlers(self) -> None:
+        if not self._app:
+            log.error("Telegram application instance is not initialized.")
+            return
+
         app = self._app
         app.add_handler(CommandHandler("start",         self._cmd_start))
         app.add_handler(CommandHandler("help",          self._cmd_help))
@@ -283,9 +293,10 @@ class TelegramBot:
             f"{id_hint}\n\n"
             "Type /help to see all available commands."
         )
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
-
-    @staticmethod
+        try:
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            log.error(f"Failed to send start message: {e}")
     def _llm_model() -> str:
         if settings.LLM_BACKEND == "copilot":
             return settings.COPILOT_MODEL
