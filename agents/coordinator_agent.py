@@ -56,7 +56,7 @@ class CoordinatorAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     async def _register_subscriptions(self) -> None:
-        self._bus.subscribe("coordinator.task",   self._handle_task)
+        self._bus.subscribe("coordinator.task", self._handle_task)
         self._bus.subscribe("coordinator.status", self._handle_status_request)
         self._bus.subscribe("coordinator.result", self._handle_result)
 
@@ -73,69 +73,97 @@ class CoordinatorAgent(BaseAgent):
             "reply_to_chat": <int chat_id – optional>
           }
         """
-        command = msg.payload.get("command", "unknown")
-        args    = msg.payload.get("args", {})
-        task_id = str(uuid.uuid4())
+        try:
+            command = msg.payload.get("command", "unknown")
+            args = msg.payload.get("args", {})
+            task_id = str(uuid.uuid4())
 
-        record: Dict[str, Any] = {
-            "id":          task_id,
-            "command":     command,
-            "args":        args,
-            "status":      RUNNING,
-            "created_at":  datetime.now(timezone.utc).isoformat(),
-            "results":     [],
-            "reply_to_chat": msg.payload.get("reply_to_chat"),
-            "reply_topic": msg.reply_to,
-        }
-        self._tasks[task_id] = record
+            record: Dict[str, Any] = {
+                "id": task_id,
+                "command": command,
+                "args": args,
+                "status": RUNNING,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "results": [],
+                "reply_to_chat": msg.payload.get("reply_to_chat"),
+                "reply_topic": msg.reply_to,
+            }
+            self._tasks[task_id] = record
 
-        log.info(f"Coordinator received task: {command} (id={task_id})")
+            log.info(f"Coordinator received task: {command} (id={task_id})")
 
-        # Route to appropriate agent(s)
-        asyncio.create_task(self._route_task(task_id, command, args, msg))
+            # Route to appropriate agent(s)
+            asyncio.create_task(self._route_task(task_id, command, args, msg))
+        except Exception as exc:
+            log.error(f"Error handling task message: {exc}")
+            if msg.reply_to:
+                await self._bus.publish(
+                    BusMessage(
+                        topic=msg.reply_to,
+                        sender=self.name,
+                        recipient=msg.sender,
+                        payload={"error": f"Failed to process task: {str(exc)}"},
+                    )
+                )
 
     async def _handle_status_request(self, msg: BusMessage) -> None:
-        task_id = msg.payload.get("task_id")
-        if task_id:
-            record = self._tasks.get(task_id)
-            payload = record if record else {"error": "task not found"}
-        else:
-            # Return summary of recent tasks
-            recent = sorted(
-                self._tasks.values(),
-                key=lambda t: t["created_at"],
-                reverse=True,
-            )[:10]
-            payload = {"tasks": recent}
+        try:
+            task_id = msg.payload.get("task_id")
+            if task_id:
+                record = self._tasks.get(task_id)
+                payload = record if record else {"error": "Task not found"}
+            else:
+                # Return summary of recent tasks
+                recent = sorted(
+                    self._tasks.values(),
+                    key=lambda t: t["created_at"],
+                    reverse=True,
+                )[:10]
+                payload = {"tasks": recent}
 
-        if msg.reply_to:
-            await self._bus.publish(
-                BusMessage(
-                    topic=msg.reply_to,
-                    sender=self.name,
-                    recipient=msg.sender,
-                    payload=payload,
+            if msg.reply_to:
+                await self._bus.publish(
+                    BusMessage(
+                        topic=msg.reply_to,
+                        sender=self.name,
+                        recipient=msg.sender,
+                        payload=payload,
+                    )
                 )
-            )
+        except Exception as exc:
+            log.error(f"Error handling status request: {exc}")
+            if msg.reply_to:
+                await self._bus.publish(
+                    BusMessage(
+                        topic=msg.reply_to,
+                        sender=self.name,
+                        recipient=msg.sender,
+                        payload={"error": f"Failed to process status request: {str(exc)}"},
+                    )
+                )
 
     async def _handle_result(self, msg: BusMessage) -> None:
         """Collect sub-task results back from agents."""
-        task_id = msg.payload.get("task_id")
-        if not task_id or task_id not in self._tasks:
-            return
+        try:
+            task_id = msg.payload.get("task_id")
+            if not task_id or task_id not in self._tasks:
+                log.warning(f"Received result for unknown task_id: {task_id}")
+                return
 
-        record = self._tasks[task_id]
-        record["results"].append({
-            "from":    msg.sender,
-            "payload": msg.payload,
-        })
+            record = self._tasks[task_id]
+            record["results"].append({
+                "from": msg.sender,
+                "payload": msg.payload,
+            })
+        except Exception as exc:
+            log.error(f"Error handling result message: {exc}")
 
     # ------------------------------------------------------------------
     # Routing logic
     # ------------------------------------------------------------------
 
     async def _route_task(self, task_id: str, command: str,
-                           args: Dict, original_msg: BusMessage) -> None:
+                          args: Dict, original_msg: BusMessage) -> None:
         try:
             result = await self._dispatch(task_id, command, args)
             self._tasks[task_id]["status"] = DONE
@@ -148,17 +176,20 @@ class CoordinatorAgent(BaseAgent):
 
         # Notify caller if reply_to is set
         if original_msg.reply_to:
-            await self._bus.publish(
-                BusMessage(
-                    topic=original_msg.reply_to,
-                    sender=self.name,
-                    recipient=original_msg.sender,
-                    payload={"task_id": task_id, "result": result},
+            try:
+                await self._bus.publish(
+                    BusMessage(
+                        topic=original_msg.reply_to,
+                        sender=self.name,
+                        recipient=original_msg.sender,
+                        payload={"task_id": task_id, "result": result},
+                    )
                 )
-            )
+            except Exception as exc:
+                log.error(f"Failed to send reply for task {task_id}: {exc}")
 
     async def _dispatch(self, task_id: str, command: str,
-                         args: Dict) -> Dict[str, Any]:
+                        args: Dict) -> Dict[str, Any]:
         """
         Map command → target agent topic and wait for result.
         """
@@ -187,7 +218,11 @@ class CoordinatorAgent(BaseAgent):
             )
             return response.payload
         except asyncio.TimeoutError:
+            log.error(f"Timeout waiting for response to task {task_id} ({command})")
             return {"error": f"Timeout waiting for response to '{command}'"}
+        except Exception as exc:
+            log.error(f"Error dispatching task {task_id}: {exc}")
+            return {"error": f"Failed to dispatch task: {str(exc)}"}
         finally:
             self._bus.unsubscribe(reply_topic, _capture)
 
@@ -197,13 +232,13 @@ class CoordinatorAgent(BaseAgent):
     ) -> tuple[str, Dict]:
         """Return (bus_topic, payload) for a given high-level command."""
         mapping = {
-            "scan_repo":       ("security.scan_repo",        args),
-            "security_scan":   ("security.full_scan",        args),
-            "code_audit":      ("security.code_audit",       args),
-            "threat_intel":    ("research.threat_intel",     args),
-            "update_self":     ("dev.update_self",           args),
-            "system_status":   ("system.status",             args),
-            "memory_query":    ("memory.query",              args),
+            "scan_repo": ("security.scan_repo", args),
+            "security_scan": ("security.full_scan", args),
+            "code_audit": ("security.code_audit", args),
+            "threat_intel": ("research.threat_intel", args),
+            "update_self": ("dev.update_self", args),
+            "system_status": ("system.status", args),
+            "memory_query": ("memory.query", args),
         }
         topic, payload = mapping.get(command, ("system.status", args))
         return topic, {**payload, "task_id": task_id}
@@ -214,9 +249,9 @@ class CoordinatorAgent(BaseAgent):
 
     def status(self) -> Dict[str, Any]:
         base = super().status()
-        base["total_tasks"]   = len(self._tasks)
+        base["total_tasks"] = len(self._tasks)
         base["running_tasks"] = sum(1 for t in self._tasks.values() if t["status"] == RUNNING)
-        base["done_tasks"]    = sum(1 for t in self._tasks.values() if t["status"] == DONE)
+        base["done_tasks"] = sum(1 for t in self._tasks.values() if t["status"] == DONE)
         return base
 
     def get_task(self, task_id: str) -> Optional[Dict]:
