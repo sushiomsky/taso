@@ -78,15 +78,19 @@ class ModelRouter:
         Route the query to the best model.
         Returns the text response.
         """
-        if task_type is None:
-            task_type = classify_task(prompt)
+        try:
+            if task_type is None:
+                task_type = classify_task(prompt)
 
-        if force_model:
-            entry = self._reg.get(force_model)
-            if entry:
-                return await self._call_model(entry, prompt, system, history)
+            if force_model:
+                entry = self._reg.get(force_model)
+                if entry:
+                    return await self._call_model(entry, prompt, system, history)
 
-        return await self._routed_query(prompt, system, history, task_type, allow_uncensored)
+            return await self._routed_query(prompt, system, history, task_type, allow_uncensored)
+        except Exception as exc:
+            log.error(f"ModelRouter: Unexpected error during query routing: {exc}")
+            return "[ModelRouter: An unexpected error occurred. Please try again later.]"
 
     async def _routed_query(
         self,
@@ -133,27 +137,31 @@ class ModelRouter:
                 if result is not None:
                     return result
 
-        return "[ModelRouter: all models failed or refused. Check Ollama is running and models are pulled.]"
+        return "[ModelRouter: All models failed or refused. Ensure the backend services are running and models are available.]"
 
     def _get_primary_model(self, task_type: TaskType) -> Optional[ModelEntry]:
         """Get the configured primary model for the active LLM backend + task type."""
         backend = settings.LLM_BACKEND
 
-        if backend == "copilot":
-            entry = self._reg.get(settings.COPILOT_MODEL)
-            if entry and entry.available:
-                return entry
-        elif backend == "ollama":
-            entry = self._reg.get(settings.OLLAMA_MODEL)
-            if entry and entry.available:
-                return entry
-        elif backend == "openai":
-            entry = self._reg.get(settings.OPENAI_MODEL)
-            if entry and entry.available:
-                return entry
+        try:
+            if backend == "copilot":
+                entry = self._reg.get(settings.COPILOT_MODEL)
+                if entry and entry.available:
+                    return entry
+            elif backend == "ollama":
+                entry = self._reg.get(settings.OLLAMA_MODEL)
+                if entry and entry.available:
+                    return entry
+            elif backend == "openai":
+                entry = self._reg.get(settings.OPENAI_MODEL)
+                if entry and entry.available:
+                    return entry
 
-        # Fall back to registry preferred model for task
-        return self._reg.preferred_for(task_type)
+            # Fall back to registry preferred model for task
+            return self._reg.preferred_for(task_type)
+        except Exception as exc:
+            log.error(f"ModelRouter: Error retrieving primary model for {task_type.value}: {exc}")
+            return None
 
     async def _try_model(
         self,
@@ -174,6 +182,7 @@ class ModelRouter:
             elif entry.provider == Provider.OPENAI:
                 return await _openai_call(entry.name, prompt, system, history)
             else:
+                log.error(f"ModelRouter: Unsupported provider '{entry.provider}' for model '{entry.name}'")
                 return None
         except Exception as exc:
             log.warning(f"ModelRouter: '{entry.name}' error: {exc}")
@@ -191,16 +200,20 @@ class ModelRouter:
         result = await self._try_model(entry, prompt, system, history)
         if result is not None:
             return result
-        return f"[ModelRouter: model '{entry.name}' unavailable.]"
+        return f"[ModelRouter: Model '{entry.name}' is unavailable or returned an error.]"
 
     def status(self) -> Dict:
-        return {
-            "active_backend": settings.LLM_BACKEND,
-            "primary_model": settings.COPILOT_MODEL if settings.LLM_BACKEND == "copilot" else settings.OLLAMA_MODEL,
-            "uncensored_model": settings.OLLAMA_UNCENSORED_MODEL,
-            "uncensored_fallback_enabled": settings.UNCENSORED_REFUSAL_FALLBACK,
-            "registered_models": len(self._reg.all_models()),
-        }
+        try:
+            return {
+                "active_backend": settings.LLM_BACKEND,
+                "primary_model": settings.COPILOT_MODEL if settings.LLM_BACKEND == "copilot" else settings.OLLAMA_MODEL,
+                "uncensored_model": settings.OLLAMA_UNCENSORED_MODEL,
+                "uncensored_fallback_enabled": settings.UNCENSORED_REFUSAL_FALLBACK,
+                "registered_models": len(self._reg.all_models()),
+            }
+        except Exception as exc:
+            log.error(f"ModelRouter: Error retrieving status: {exc}")
+            return {"error": "Unable to retrieve status."}
 
 
 # ---------------------------------------------------------------------------
@@ -230,17 +243,20 @@ async def _copilot_call(model: str, prompt: str, system: str, history) -> str:
         })
 
     async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.post(
-            f"{base}/chat/completions",
-            json={"model": model, "messages": messages, "max_tokens": 4096, "temperature": 0.2},
-            timeout=aiohttp.ClientTimeout(total=120),
-        ) as resp:
-            if resp.status in (401, 403):
-                raise PermissionError(f"Auth error {resp.status}")
-            resp.raise_for_status()
-            data = await resp.json()
-    return data["choices"][0]["message"]["content"]
-
+        try:
+            async with session.post(
+                f"{base}/chat/completions",
+                json={"model": model, "messages": messages, "max_tokens": 4096, "temperature": 0.2},
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                if resp.status in (401, 403):
+                    raise PermissionError(f"Auth error {resp.status}")
+                resp.raise_for_status()
+                data = await resp.json()
+            return data["choices"][0]["message"]["content"]
+        except aiohttp.ClientError as e:
+            log.error(f"Copilot API call failed: {e}")
+            raise
 
 async def _openai_call(model: str, prompt: str, system: str, history) -> str:
     import openai
@@ -251,10 +267,14 @@ async def _openai_call(model: str, prompt: str, system: str, history) -> str:
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": prompt})
-    resp = await client.chat.completions.create(
-        model=model, messages=messages, max_tokens=4096
-    )
-    return resp.choices[0].message.content
+    try:
+        resp = await client.chat.completions.create(
+            model=model, messages=messages, max_tokens=4096
+        )
+        return resp.choices[0].message.content
+    except openai.error.OpenAIError as e:
+        log.error(f"OpenAI API call failed: {e}")
+        raise
 
 
 # Singleton router
