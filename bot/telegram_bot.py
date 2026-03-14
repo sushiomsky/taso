@@ -690,6 +690,103 @@ class TelegramBot:
     # Free-text handler (LLM conversation)
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # NLP Intent Router
+    # ------------------------------------------------------------------
+
+    # Maps intent name → (handler_method, needs_args_key)
+    # handler_method receives (update, ctx, extracted_arg: str)
+    _INTENT_MAP: Dict[str, str] = {
+        "status":        "_nlp_status",
+        "agents":        "_nlp_agents",
+        "tools":         "_nlp_tools",
+        "system":        "_nlp_system",
+        "logs":          "_nlp_logs",
+        "memory":        "_nlp_memory",
+        "scan_repo":     "_nlp_scan_repo",
+        "security_scan": "_nlp_security_scan",
+        "code_audit":    "_nlp_code_audit",
+        "threat_intel":  "_nlp_threat_intel",
+        "update_self":   "_nlp_update_self",
+        "swarm_status":  "_nlp_swarm_status",
+        "swarm_agents":  "_nlp_swarm_agents",
+        "swarm_models":  "_nlp_swarm_models",
+        "swarm_task":    "_nlp_swarm_task",
+        "dev_status":    "_nlp_dev_status",
+        "dev_task":      "_nlp_dev_task",
+        "dev_tool":      "_nlp_dev_tool",
+        "dev_patch":     "_nlp_dev_patch",
+        "dev_rollback":  "_nlp_dev_rollback",
+        "dev_deploy":    "_nlp_dev_deploy",
+        "dev_suggestion":"_nlp_dev_suggestion",
+        "chat":          "_nlp_chat",
+    }
+
+    _INTENT_SYSTEM = (
+        "You are an intent classifier for TASO, a security AI bot. "
+        "Given a user message, respond with JSON only — no explanation.\n\n"
+        "Available intents:\n"
+        "- status: check bot/system status\n"
+        "- agents: list running agents\n"
+        "- tools: list available tools\n"
+        "- system: system resource info\n"
+        "- logs: view recent logs\n"
+        "- memory: query stored knowledge/memory\n"
+        "- scan_repo: scan/analyze a code repository (arg: repo path or URL)\n"
+        "- security_scan: run security vulnerability scan (arg: target path/URL)\n"
+        "- code_audit: audit a code snippet for vulnerabilities\n"
+        "- threat_intel: gather threat intelligence on a topic (arg: topic/CVE/domain)\n"
+        "- update_self: trigger self-improvement/update cycle\n"
+        "- swarm_status: swarm orchestrator status\n"
+        "- swarm_agents: list swarm agents\n"
+        "- swarm_models: list available LLM models\n"
+        "- swarm_task: run a complex task via agent swarm (arg: task description)\n"
+        "- dev_status: development/version/health overview\n"
+        "- dev_task: submit a development or feature task (arg: task description)\n"
+        "- dev_tool: create a new tool via LLM (arg: tool description)\n"
+        "- dev_patch: patch/modify a module (arg: what to change)\n"
+        "- dev_rollback: rollback to previous version\n"
+        "- dev_deploy: deploy latest code from GitHub\n"
+        "- dev_suggestion: ask bot to suggest improvements\n"
+        "- chat: general conversation, questions, anything else\n\n"
+        "Respond with ONLY valid JSON:\n"
+        '{"intent": "<intent>", "arg": "<extracted argument or empty string>", '
+        '"confidence": <0.0-1.0>}'
+    )
+
+    async def _classify_intent(self, text: str, history: List[Dict]) -> Dict:
+        """Use LLM to classify the user's natural-language intent."""
+        try:
+            from models.model_router import router
+            from models.model_registry import TaskType
+            # Build compact history context (last 3 turns)
+            ctx_lines = []
+            for h in history[-6:]:
+                role = h.get("role", "")
+                content = h.get("content", "")[:120]
+                ctx_lines.append(f"{role}: {content}")
+            ctx_str = "\n".join(ctx_lines)
+
+            prompt = (
+                f"Conversation context:\n{ctx_str}\n\n"
+                f"User message: {text}"
+            ) if ctx_str else f"User message: {text}"
+
+            raw = await router.query(
+                prompt=prompt,
+                task_type=TaskType.ANALYSIS,
+                system=self._INTENT_SYSTEM,
+            )
+            # Extract JSON from response
+            import re as _re
+            m = _re.search(r'\{[^{}]+\}', raw, _re.DOTALL)
+            if m:
+                return json.loads(m.group())
+        except Exception as exc:
+            log.warning(f"Intent classification failed: {exc}")
+        # Fallback: treat as chat
+        return {"intent": "chat", "arg": text, "confidence": 0.5}
+
     async def _handle_message(
         self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -697,43 +794,193 @@ class TelegramBot:
             return
 
         chat_id = update.effective_chat.id
-        text    = update.message.text or ""
+        text    = (update.message.text or "").strip()
 
-        # Check if awaiting code for audit
+        if not text:
+            return
+
+        # --- Awaiting state takes priority ---
         if ctx.user_data.get("awaiting_code_audit"):
             ctx.user_data.pop("awaiting_code_audit")
-            await update.message.reply_text("🔍 Auditing code…")
+            await update.message.reply_text("🔍 Auditing submitted code…")
             result = await self._dispatch_task(
-                "code_audit",
-                {"code": text, "filename": "user_submitted.py"},
-                update,
+                "code_audit", {"code": text, "filename": "user_submitted.py"}, update
             )
             analysis = result.get("result", {}).get("analysis", "No analysis.")
             await self._reply_long(
-                update,
-                f"🛡️ **Code Audit Result**\n\n{analysis}",
+                update, f"🛡️ **Code Audit Result**\n\n{analysis}",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
 
-        # Store user message
+        # --- Store message & load history ---
         await self._conv.add_message(chat_id, "user", text)
-
-        # Get conversation context for LLM
         history = await self._conv.get_context(chat_id)
 
-        # Route via coordinator LLM query
-        # We directly use the coordinator agent's base LLM method here
-        system = (
-            "You are TASO, an autonomous security research assistant integrated "
-            "with a Telegram bot. You help with cybersecurity analysis, threat "
-            "intelligence, and security automation. Be concise and technical."
-        )
-        response = await self._coordinator.llm_query(text, system=system,
-                                                       history=history)
+        # --- Classify intent ---
+        classification = await self._classify_intent(text, history)
+        intent     = classification.get("intent", "chat")
+        arg        = classification.get("arg", text)
+        confidence = classification.get("confidence", 1.0)
 
-        await self._conv.add_message(chat_id, "assistant", response)
-        await self._reply_long(update, response)
+        log.info(f"NLP intent: {intent!r} confidence={confidence:.2f} arg={str(arg)[:60]!r}")
+
+        # Show intent hint for transparency (only when not plain chat)
+        if intent != "chat" and confidence >= 0.75:
+            intent_labels = {
+                "scan_repo": "🔍 Scanning repository",
+                "security_scan": "🛡️ Running security scan",
+                "code_audit": "🔎 Preparing code audit",
+                "threat_intel": "🌐 Gathering threat intelligence",
+                "update_self": "🔄 Triggering self-update",
+                "swarm_task": "🐝 Dispatching to agent swarm",
+                "dev_task": "⚙️ Submitting dev task",
+                "dev_tool": "🛠️ Creating new tool",
+                "dev_patch": "📝 Generating patch",
+                "dev_rollback": "⏪ Rolling back",
+                "dev_deploy": "🚀 Deploying",
+            }
+            label = intent_labels.get(intent)
+            if label:
+                await update.message.reply_text(f"{label}…")
+
+        # --- Dispatch to intent handler ---
+        handler_name = self._INTENT_MAP.get(intent, "_nlp_chat")
+        handler = getattr(self, handler_name, self._nlp_chat)
+        response = await handler(update, ctx, arg, history)
+
+        if response:
+            await self._conv.add_message(chat_id, "assistant", response[:500])
+            await self._reply_long(update, response)
+
+    # ------------------------------------------------------------------
+    # NLP intent handlers — thin wrappers that reuse existing logic
+    # ------------------------------------------------------------------
+
+    async def _nlp_status(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_status(update, ctx)
+        return None  # handler already replied
+
+    async def _nlp_agents(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_agents(update, ctx)
+        return None
+
+    async def _nlp_tools(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_tools(update, ctx)
+        return None
+
+    async def _nlp_system(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_system(update, ctx)
+        return None
+
+    async def _nlp_logs(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_logs(update, ctx)
+        return None
+
+    async def _nlp_memory(self, update, ctx, arg, history) -> Optional[str]:
+        ctx.args = arg.split() if arg else []
+        await self._cmd_memory(update, ctx)
+        return None
+
+    async def _nlp_scan_repo(self, update, ctx, arg, history) -> Optional[str]:
+        ctx.args = arg.split() if arg else []
+        await self._cmd_scan_repo(update, ctx)
+        return None
+
+    async def _nlp_security_scan(self, update, ctx, arg, history) -> Optional[str]:
+        ctx.args = arg.split() if arg else []
+        await self._cmd_security_scan(update, ctx)
+        return None
+
+    async def _nlp_code_audit(self, update, ctx, arg, history) -> Optional[str]:
+        # If arg looks like code (has newlines or >80 chars), audit directly
+        if "\n" in arg or len(arg) > 80:
+            result = await self._dispatch_task(
+                "code_audit", {"code": arg, "filename": "nlp_submitted.py"}, update
+            )
+            analysis = result.get("result", {}).get("analysis", "No analysis.")
+            await self._reply_long(
+                update, f"🛡️ **Code Audit Result**\n\n{analysis}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await update.message.reply_text(
+                "📎 Please send the code you want audited as the next message."
+            )
+            ctx.user_data["awaiting_code_audit"] = True
+        return None
+
+    async def _nlp_threat_intel(self, update, ctx, arg, history) -> Optional[str]:
+        ctx.args = arg.split() if arg else []
+        await self._cmd_threat_intel(update, ctx)
+        return None
+
+    async def _nlp_update_self(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_update_self(update, ctx)
+        return None
+
+    async def _nlp_swarm_status(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_swarm_status(update, ctx)
+        return None
+
+    async def _nlp_swarm_agents(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_swarm_agents(update, ctx)
+        return None
+
+    async def _nlp_swarm_models(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_swarm_models(update, ctx)
+        return None
+
+    async def _nlp_swarm_task(self, update, ctx, arg, history) -> Optional[str]:
+        ctx.args = arg.split() if arg else []
+        await self._cmd_run_swarm_task(update, ctx)
+        return None
+
+    async def _nlp_dev_status(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_dev_status(update, ctx)
+        return None
+
+    async def _nlp_dev_task(self, update, ctx, arg, history) -> Optional[str]:
+        ctx.args = arg.split() if arg else []
+        await self._cmd_dev_task(update, ctx)
+        return None
+
+    async def _nlp_dev_tool(self, update, ctx, arg, history) -> Optional[str]:
+        ctx.args = arg.split() if arg else []
+        await self._cmd_dev_tool(update, ctx)
+        return None
+
+    async def _nlp_dev_patch(self, update, ctx, arg, history) -> Optional[str]:
+        ctx.args = arg.split() if arg else []
+        await self._cmd_dev_patch(update, ctx)
+        return None
+
+    async def _nlp_dev_rollback(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_dev_rollback(update, ctx)
+        return None
+
+    async def _nlp_dev_deploy(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_dev_deploy(update, ctx)
+        return None
+
+    async def _nlp_dev_suggestion(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_dev_suggestion(update, ctx)
+        return None
+
+    async def _nlp_chat(self, update, ctx, arg, history) -> Optional[str]:
+        """General conversation — answer directly via LLM."""
+        system = (
+            "You are TASO, an autonomous AI security research assistant. "
+            "You help with cybersecurity analysis, threat intelligence, code review, "
+            "and security automation. Be concise, technical, and direct. "
+            "You can also explain your own capabilities when asked."
+        )
+        response = await self._coordinator.llm_query(
+            arg or update.message.text or "",
+            system=system,
+            history=history,
+        )
+        return response
 
     # ------------------------------------------------------------------
     # Inline keyboard callbacks
