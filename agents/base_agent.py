@@ -39,17 +39,31 @@ class BaseAgent(ABC):
 
     async def start(self) -> None:
         """Register subscriptions and begin operation."""
+        if self._running:
+            self._log.warning(f"Agent '{self.name}' is already running.")
+            return
         self._running = True
-        await self._register_subscriptions()
-        self._log.info(f"Agent '{self.name}' started.")
+        try:
+            await self._register_subscriptions()
+            self._log.info(f"Agent '{self.name}' started.")
+        except Exception as exc:
+            self._log.error(f"Failed to start agent '{self.name}': {exc}")
+            self._running = False
+            raise
 
     async def stop(self) -> None:
         """Cancel all running tasks."""
+        if not self._running:
+            self._log.warning(f"Agent '{self.name}' is not running.")
+            return
         self._running = False
         for task in self._tasks:
             task.cancel()
         if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            results = await asyncio.gather(*self._tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    self._log.error(f"Error while stopping task: {result}")
         self._tasks.clear()
         self._log.info(f"Agent '{self.name}' stopped.")
 
@@ -64,14 +78,18 @@ class BaseAgent(ABC):
     async def publish(self, topic: str, payload: Dict[str, Any],
                        reply_to: Optional[str] = None,
                        recipient: str = "*") -> None:
-        msg = BusMessage(
-            topic=topic,
-            sender=self.name,
-            payload=payload,
-            reply_to=reply_to,
-            recipient=recipient,
-        )
-        await self._bus.publish(msg)
+        try:
+            msg = BusMessage(
+                topic=topic,
+                sender=self.name,
+                payload=payload,
+                reply_to=reply_to,
+                recipient=recipient,
+            )
+            await self._bus.publish(msg)
+        except Exception as exc:
+            self._log.error(f"Failed to publish message to topic '{topic}': {exc}")
+            raise
 
     # ------------------------------------------------------------------
     # LLM helper
@@ -117,9 +135,7 @@ async def _ollama_query(prompt: str, system: str,
     """Query local Ollama server."""
     import aiohttp
 
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
+    messages = [{"role": "system", "content": system}] if system else []
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": prompt})
@@ -130,15 +146,19 @@ async def _ollama_query(prompt: str, system: str,
         "stream": False,
     }
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            f"{settings.OLLAMA_BASE_URL}/api/chat",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=120),
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            return data["message"]["content"]
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{settings.OLLAMA_BASE_URL}/api/chat",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                return data.get("message", {}).get("content", "")
+    except aiohttp.ClientError as e:
+        log.error(f"Ollama query failed: {e}")
+        raise
 
 
 async def _openai_query(prompt: str, system: str,
@@ -146,20 +166,22 @@ async def _openai_query(prompt: str, system: str,
     """Query OpenAI API."""
     import openai
 
-    client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
+    messages = [{"role": "system", "content": system}] if system else []
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": prompt})
 
-    resp = await client.chat.completions.create(
-        model=settings.OPENAI_MODEL,
-        messages=messages,
-        max_tokens=4096,
-    )
-    return resp.choices[0].message.content
+    try:
+        client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        resp = await client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            messages=messages,
+            max_tokens=4096,
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        log.error(f"OpenAI query failed: {e}")
+        raise
 
 
 async def _anthropic_query(prompt: str, system: str,
@@ -167,19 +189,21 @@ async def _anthropic_query(prompt: str, system: str,
     """Query Anthropic API."""
     import anthropic
 
-    client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
-    messages = []
-    if history:
-        messages.extend(history)
+    messages = history or []
     messages.append({"role": "user", "content": prompt})
 
-    resp = await client.messages.create(
-        model=settings.ANTHROPIC_MODEL,
-        max_tokens=4096,
-        system=system or "You are TASO, an autonomous security research assistant.",
-        messages=messages,
-    )
-    return resp.content[0].text
+    try:
+        client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        resp = await client.messages.create(
+            model=settings.ANTHROPIC_MODEL,
+            max_tokens=4096,
+            system=system or "You are TASO, an autonomous security research assistant.",
+            messages=messages,
+        )
+        return resp.content[0].text
+    except Exception as e:
+        log.error(f"Anthropic query failed: {e}")
+        raise
 
 
 async def _copilot_query(prompt: str, system: str,
@@ -205,9 +229,7 @@ async def _copilot_query(prompt: str, system: str,
             "https://github.com/settings/tokens"
         )
 
-    messages: List[Dict] = []
-    if system:
-        messages.append({"role": "system", "content": system})
+    messages = [{"role": "system", "content": system}] if system else []
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": prompt})
@@ -238,21 +260,24 @@ async def _copilot_query(prompt: str, system: str,
             "OpenAI-Intent":           "conversation-panel",
         })
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.post(
-            url,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=120),
-        ) as resp:
-            if resp.status in (401, 403):
-                body = await resp.text()
-                raise _AuthError(
-                    f"HTTP {resp.status} from {base} — "
-                    f"check GITHUB_TOKEN scope (needs 'models:read' for "
-                    f"GitHub Models, or Copilot subscription for Copilot API). "
-                    f"Response: {body[:200]}"
-                )
-            resp.raise_for_status()
-            data = await resp.json()
-
-    return data["choices"][0]["message"]["content"]
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.post(
+                url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                if resp.status in (401, 403):
+                    body = await resp.text()
+                    raise _AuthError(
+                        f"HTTP {resp.status} from {base} — "
+                        f"check GITHUB_TOKEN scope (needs 'models:read' for "
+                        f"GitHub Models, or Copilot subscription for Copilot API). "
+                        f"Response: {body[:200]}"
+                    )
+                resp.raise_for_status()
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"]
+    except aiohttp.ClientError as e:
+        log.error(f"Copilot query failed: {e}")
+        raise
