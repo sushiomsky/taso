@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS rollback_log (
 
 class VersionHistoryDB:
     def __init__(self, path: Path = None) -> None:
-        self._path = path or (settings.BASE_DIR / "data" / "version_history.db")
+        self._path = path or (settings.DB_PATH.parent / "version_history.db")
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._db: Optional[aiosqlite.Connection] = None
 
