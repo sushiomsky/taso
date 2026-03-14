@@ -33,30 +33,39 @@ Only output the diff. No explanation.
 
 
 class DeveloperAgent(BaseAgent):
-    name        = "developer"
+    name = "developer"
     description = "Generates code, patches, and new tools via multi-model LLM orchestration."
 
     async def _register_subscriptions(self) -> None:
         self._bus.subscribe("developer.*", self._handle_dev_request)
 
     async def _handle_dev_request(self, msg: BusMessage) -> None:
-        action = msg.payload.get("action", "generate")
-        task   = msg.payload.get("task", "")
-        context = msg.payload.get("context", "")
+        try:
+            action = msg.payload.get("action", "generate")
+            task = msg.payload.get("task", "")
+            context = msg.payload.get("context", "")
 
-        if action == "generate_tool":
-            result = await self._generate_tool(task)
-        elif action == "generate_patch":
-            result = await self._generate_patch(task, context)
-        else:
-            result = await self.handle(task, context)
+            if action == "generate_tool":
+                result = await self._generate_tool(task)
+            elif action == "generate_patch":
+                result = await self._generate_patch(task, context)
+            else:
+                result = await self.handle(task, context)
 
-        if msg.reply_to:
-            await self.publish(
-                topic=msg.reply_to,
-                payload={"result": result, "agent": self.name, "action": action},
-                recipient=msg.sender,
-            )
+            if msg.reply_to:
+                await self.publish(
+                    topic=msg.reply_to,
+                    payload={"result": result, "agent": self.name, "action": action},
+                    recipient=msg.sender,
+                )
+        except Exception as exc:
+            log.error(f"Error handling developer request: {exc}")
+            if msg.reply_to:
+                await self.publish(
+                    topic=msg.reply_to,
+                    payload={"error": str(exc), "agent": self.name, "action": "error"},
+                    recipient=msg.sender,
+                )
 
     async def _generate_tool(self, task: str) -> str:
         """Generate a new dynamic tool, test it, and register if safe."""
@@ -73,7 +82,7 @@ class DeveloperAgent(BaseAgent):
             tool.test_output = output
 
             if passed:
-                ok = tool_registry.register_dynamic(
+                registration_success = tool_registry.register_dynamic(
                     name=tool.name,
                     code=tool.code,
                     description=tool.description,
@@ -82,8 +91,8 @@ class DeveloperAgent(BaseAgent):
                     tags=tool.tags,
                     version=tool.version,
                 )
-                if ok:
-                    rec = version_manager.record(
+                if registration_success:
+                    version_manager.record(
                         author_agent=self.name,
                         change_type="tool_add",
                         description=f"Generated tool '{tool.name}': {tool.description}",
@@ -91,9 +100,12 @@ class DeveloperAgent(BaseAgent):
                         metadata={"tool_id": tool.id, "tool_name": tool.name},
                     )
                     await version_history_db.log_tool(
-                        tool_name=tool.name, version=tool.version,
-                        action="created", agent=self.name,
-                        test_passed=True, test_output=output,
+                        tool_name=tool.name,
+                        version=tool.version,
+                        action="created",
+                        agent=self.name,
+                        test_passed=True,
+                        test_output=output,
                         code_hash=hashlib.sha256(tool.code.encode()).hexdigest()[:16],
                     )
                     return (
@@ -102,38 +114,51 @@ class DeveloperAgent(BaseAgent):
                         f"Version: {tool.version} | ID: {tool.id}\n"
                         f"Test output: {output[:200]}"
                     )
-                return f"❌ Tool '{tool.name}' generated but registration failed."
+                else:
+                    return f"❌ Tool '{tool.name}' generated but registration failed."
             else:
                 await version_history_db.log_tool(
-                    tool_name=tool.name, version=tool.version,
-                    action="tested", agent=self.name,
-                    test_passed=False, test_output=output,
+                    tool_name=tool.name,
+                    version=tool.version,
+                    action="tested",
+                    agent=self.name,
+                    test_passed=False,
+                    test_output=output,
                 )
                 return (
                     f"❌ Tool '{tool.name}' generated but FAILED sandbox test.\n"
                     f"Error: {output[:300]}"
                 )
         except Exception as exc:
-            self._log.error(f"DeveloperAgent: tool generation failed: {exc}")
+            log.error(f"DeveloperAgent: tool generation failed: {exc}")
             return f"❌ Tool generation failed: {exc}"
 
     async def _generate_patch(self, task: str, context: str) -> str:
         """Generate a code patch and return the unified diff."""
-        prompt = task
-        if context:
-            prompt = f"Existing code:\n```python\n{context}\n```\n\nRequested change: {task}"
-        return await model_router.query(
-            prompt=prompt,
-            system=_PATCH_SYSTEM,
-            task_type=TaskType.CODING,
-        )
+        try:
+            prompt = task
+            if context:
+                prompt = f"Existing code:\n```python\n{context}\n```\n\nRequested change: {task}"
+            return await model_router.query(
+                prompt=prompt,
+                system=_PATCH_SYSTEM,
+                task_type=TaskType.CODING,
+            )
+        except Exception as exc:
+            log.error(f"DeveloperAgent: patch generation failed: {exc}")
+            return f"❌ Patch generation failed: {exc}"
 
     async def handle(self, description: str, context: str = "") -> str:
-        prompt = description
-        if context:
-            prompt = f"Context:\n{context}\n\nTask: {description}"
-        return await model_router.query(
-            prompt=prompt,
-            system=_DEV_SYSTEM,
-            task_type=TaskType.CODING,
-        )
+        """Handle a generic development task."""
+        try:
+            prompt = description
+            if context:
+                prompt = f"Context:\n{context}\n\nTask: {description}"
+            return await model_router.query(
+                prompt=prompt,
+                system=_DEV_SYSTEM,
+                task_type=TaskType.CODING,
+            )
+        except Exception as exc:
+            log.error(f"DeveloperAgent: task handling failed: {exc}")
+            return f"❌ Task handling failed: {exc}"
