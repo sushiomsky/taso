@@ -1,0 +1,79 @@
+version: "3.9"
+
+# ============================================================
+# TASO – Docker Compose
+# ============================================================
+# Services:
+#   taso   – main application
+#   ollama – local LLM server (optional)
+#   tor    – Tor SOCKS5 proxy (optional)
+# ============================================================
+
+services:
+
+  # ── TASO application ─────────────────────────────────────
+  taso:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: taso
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data          # persistent database + vector index
+      - ./logs:/app/logs          # log files
+      - /var/run/docker.sock:/var/run/docker.sock  # required for sandbox
+    depends_on:
+      - ollama
+      - tor
+    networks:
+      - taso_net
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - TOR_SOCKS_HOST=tor
+      - TOR_SOCKS_PORT=9050
+
+  # ── Ollama local LLM ─────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: taso_ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - taso_net
+    # Uncomment to expose Ollama externally (dev only):
+    # ports:
+    #   - "11434:11434"
+    # Uncomment for GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # ── Tor SOCKS5 proxy ─────────────────────────────────────
+  tor:
+    image: dperson/torproxy:latest
+    container_name: taso_tor
+    restart: unless-stopped
+    networks:
+      - taso_net
+    environment:
+      - TORARGS=SocksPort 0.0.0.0:9050
+    # Healthcheck: verify Tor circuit is established
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -sS --socks5 localhost:9050 https://check.torproject.org/api/ip | grep -q '\"IsTor\":true'"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+
+networks:
+  taso_net:
+    driver: bridge
+
+volumes:
+  ollama_data:

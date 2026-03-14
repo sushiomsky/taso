@@ -1,0 +1,54 @@
+# TASO .gitignore
+
+# Environment
+.env
+*.env.local
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Data (user-generated, not committed)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# FAISS indices
+*.index
+*.pkl
+
+# Logs
+logs/
+*.log
+
+# Docker
+.docker/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temp files
+/tmp/
+*.patch
+taso_sandbox_*
+taso_test_*
+taso_sa_*
