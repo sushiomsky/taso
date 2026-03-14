@@ -10,6 +10,7 @@ import ast
 import re
 import textwrap
 import uuid
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -78,11 +79,16 @@ class DynamicToolGenerator:
             raise RuntimeError("LLM failed to generate tool code")
 
         # 2. Validate Python syntax
-        code = self._clean_code(code)
-        ast.parse(code)  # raises SyntaxError if invalid
+        try:
+            code = self._clean_code(code)
+            ast.parse(code)  # raises SyntaxError if invalid
+        except SyntaxError as e:
+            log.error(f"Generated code has invalid syntax: {e}")
+            raise ValueError("Generated code contains invalid Python syntax") from e
 
         # 3. Ensure run_tool exists
         if "def run_tool" not in code:
+            log.error("Generated code does not contain run_tool() function")
             raise ValueError("Generated code does not contain run_tool() function")
 
         # 4. Extract metadata
@@ -100,7 +106,7 @@ class DynamicToolGenerator:
         )
 
     async def _generate_code(self, task: str) -> Optional[str]:
-        # Try deepseek-coder first, fall back to default model
+        """Generate Python tool code using available LLM models."""
         for model in ["deepseek-coder", settings.OLLAMA_MODEL, settings.OLLAMA_UNCENSORED_MODEL]:
             try:
                 code = await ollama_chat(
@@ -114,37 +120,45 @@ class DynamicToolGenerator:
                     return code
             except Exception as exc:
                 log.warning(f"DynamicToolGenerator: model '{model}' failed: {exc}")
+        log.error("All models failed to generate code")
         return None
 
     async def _extract_metadata(self, code: str) -> Dict:
+        """Extract metadata from the generated tool code."""
         try:
-            # Try copilot/primary first for better JSON extraction
+            response = None
             try:
                 from models.model_router import router
                 response = await router.query(
                     prompt=f"Tool code:\n{code}\n\nGenerate metadata JSON.",
                     system=_DESCRIPTION_SYSTEM,
                 )
-            except Exception:
+            except Exception as router_exc:
+                log.warning(f"Model router failed, falling back to Ollama: {router_exc}")
                 response = await ollama_chat(
                     model=settings.OLLAMA_MODEL,
                     prompt=f"Tool code:\n{code}\n\nGenerate metadata JSON.",
                     system=_DESCRIPTION_SYSTEM,
                 )
-            # Extract JSON
-            match = re.search(r'\{.*\}', response, re.DOTALL)
-            if match:
-                import json
-                return json.loads(match.group())
+            if response:
+                match = re.search(r'\{.*\}', response, re.DOTALL)
+                if match:
+                    return json.loads(match.group())
+        except json.JSONDecodeError as json_exc:
+            log.error(f"Failed to decode metadata JSON: {json_exc}")
         except Exception as exc:
-            log.warning(f"DynamicToolGenerator: metadata extraction failed: {exc}")
+            log.error(f"Unexpected error during metadata extraction: {exc}")
         return {}
 
     def _clean_code(self, code: str) -> str:
         """Strip markdown fences and normalize indentation."""
-        code = re.sub(r'^```python\n?', '', code, flags=re.MULTILINE)
-        code = re.sub(r'^```\n?', '', code, flags=re.MULTILINE)
-        return textwrap.dedent(code).strip()
+        try:
+            code = re.sub(r'^```python\n?', '', code, flags=re.MULTILINE)
+            code = re.sub(r'^```\n?', '', code, flags=re.MULTILINE)
+            return textwrap.dedent(code).strip()
+        except Exception as exc:
+            log.error(f"Error cleaning code: {exc}")
+            raise ValueError("Failed to clean generated code") from exc
 
 
 tool_generator = DynamicToolGenerator()
