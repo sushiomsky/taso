@@ -50,16 +50,23 @@ class VersionManager:
 
     def record(self, **kwargs) -> VersionRecord:
         """Create and store a new version record."""
-        if "version_id" not in kwargs:
-            kwargs["version_id"] = make_version_id()
-        rec = VersionRecord(**kwargs)
-        self._records[rec.version_id] = rec
-        log.info(f"VersionManager: recorded {rec.version_id} ({rec.change_type} by {rec.author_agent})")
-        return rec
+        try:
+            if "version_id" not in kwargs:
+                kwargs["version_id"] = make_version_id()
+            rec = VersionRecord(**kwargs)
+            self._records[rec.version_id] = rec
+            log.info(f"VersionManager: recorded {rec.version_id} ({rec.change_type} by {rec.author_agent})")
+            return rec
+        except Exception as e:
+            log.error(f"Failed to record version: {e}")
+            raise ValueError("Error creating version record. Please check the input parameters.")
 
     def mark_stable(self, version_id: str, commit_sha: str = None) -> None:
-        rec = self._records.get(version_id)
-        if rec:
+        try:
+            rec = self._records.get(version_id)
+            if not rec:
+                log.error(f"VersionManager: Version ID {version_id} not found.")
+                raise ValueError(f"Version ID {version_id} not found.")
             rec.stable = True
             rec.deployed = True
             if commit_sha:
@@ -67,42 +74,65 @@ class VersionManager:
             if version_id not in self._stable_stack:
                 self._stable_stack.append(version_id)
             log.info(f"VersionManager: {version_id} marked stable.")
+        except Exception as e:
+            log.error(f"Failed to mark version {version_id} as stable: {e}")
+            raise ValueError(f"Error marking version {version_id} as stable.")
 
     def last_stable(self) -> Optional[VersionRecord]:
         if not self._stable_stack:
+            log.warning("VersionManager: No stable versions available.")
             return None
         return self._records.get(self._stable_stack[-1])
 
     def prev_stable(self) -> Optional[VersionRecord]:
         if len(self._stable_stack) < 2:
+            log.warning("VersionManager: No previous stable version available.")
             return None
         return self._records.get(self._stable_stack[-2])
 
     def all_records(self, limit: int = 20) -> List[VersionRecord]:
-        recs = sorted(self._records.values(), key=lambda r: r.timestamp, reverse=True)
-        return recs[:limit]
+        try:
+            recs = sorted(self._records.values(), key=lambda r: r.timestamp, reverse=True)
+            return recs[:limit]
+        except Exception as e:
+            log.error(f"Failed to retrieve all records: {e}")
+            return []
 
     def get(self, version_id: str) -> Optional[VersionRecord]:
-        return self._records.get(version_id)
+        try:
+            return self._records.get(version_id)
+        except Exception as e:
+            log.error(f"Failed to retrieve version {version_id}: {e}")
+            return None
 
     def status_dict(self) -> Dict:
-        last = self.last_stable()
-        return {
-            "total_versions": len(self._records),
-            "stable_versions": len(self._stable_stack),
-            "last_stable": last.version_id if last else None,
-            "last_stable_sha": last.commit_sha if last else None,
-            "recent": [
-                {
-                    "id": r.version_id,
-                    "type": r.change_type,
-                    "agent": r.author_agent,
-                    "stable": r.stable,
-                    "ts": r.datetime_str,
-                }
-                for r in self.all_records(5)
-            ],
-        }
+        try:
+            last = self.last_stable()
+            return {
+                "total_versions": len(self._records),
+                "stable_versions": len(self._stable_stack),
+                "last_stable": last.version_id if last else None,
+                "last_stable_sha": last.commit_sha if last else None,
+                "recent": [
+                    {
+                        "id": r.version_id,
+                        "type": r.change_type,
+                        "agent": r.author_agent,
+                        "stable": r.stable,
+                        "ts": r.datetime_str,
+                    }
+                    for r in self.all_records(5)
+                ],
+            }
+        except Exception as e:
+            log.error(f"Failed to generate status dictionary: {e}")
+            return {
+                "total_versions": 0,
+                "stable_versions": 0,
+                "last_stable": None,
+                "last_stable_sha": None,
+                "recent": [],
+            }
 
 
 version_manager = VersionManager()
