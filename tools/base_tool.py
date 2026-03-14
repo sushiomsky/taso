@@ -34,6 +34,8 @@ class ToolSchema:
         for name, spec in self.fields.items():
             if spec.get("required") and name not in inputs:
                 return f"Missing required field: '{name}'"
+            if name in inputs and not isinstance(inputs[name], eval(spec.get("type", "str"))):
+                return f"Invalid type for field: '{name}', expected {spec.get('type')}"
         return None
 
 
@@ -51,14 +53,15 @@ class BaseTool(ABC):
         """
         error = self.schema.validate(kwargs)
         if error:
+            log.warning(f"Validation failed for tool '{self.name}': {error}")
             return {"success": False, "result": None, "error": error}
 
         try:
             result = await self.execute(**kwargs)
             return {"success": True, "result": result, "error": None}
         except Exception as exc:
-            log.error(f"Tool '{self.name}' error: {exc}")
-            return {"success": False, "result": None, "error": str(exc)}
+            log.error(f"Tool '{self.name}' execution error: {exc}", exc_info=True)
+            return {"success": False, "result": None, "error": f"An error occurred: {str(exc)}"}
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> Any:
@@ -96,7 +99,7 @@ class ToolRegistry:
             try:
                 mod = importlib.import_module(f"tools.{module_info.name}")
             except Exception as exc:
-                log.warning(f"Could not import tools.{module_info.name}: {exc}")
+                log.warning(f"Could not import tools.{module_info.name}: {exc}", exc_info=True)
                 continue
 
             for attr_name in dir(mod):
@@ -107,14 +110,20 @@ class ToolRegistry:
                     and obj is not BaseTool
                     and obj.name != "base_tool"
                 ):
-                    instance = obj()
-                    self._tools[instance.name] = instance
-                    log.debug(f"Registered tool: {instance.name}")
+                    try:
+                        instance = obj()
+                        self._tools[instance.name] = instance
+                        log.debug(f"Registered tool: {instance.name}")
+                    except Exception as exc:
+                        log.error(f"Failed to instantiate tool '{obj.__name__}': {exc}", exc_info=True)
 
         log.info(f"ToolRegistry: {len(self._tools)} tools loaded.")
 
     def get(self, name: str) -> Optional[BaseTool]:
-        return self._tools.get(name)
+        tool = self._tools.get(name)
+        if not tool:
+            log.warning(f"Tool '{name}' not found in registry.")
+        return tool
 
     def list_tools(self) -> List[Dict[str, Any]]:
         return [t.describe() for t in self._tools.values()]
@@ -158,11 +167,14 @@ class ToolRegistry:
             log.info(f"ToolRegistry: dynamic tool '{name}' registered (v{version})")
             return True
         except Exception as exc:
-            log.error(f"ToolRegistry: failed to register dynamic tool '{name}': {exc}")
+            log.error(f"ToolRegistry: failed to register dynamic tool '{name}': {exc}", exc_info=True)
             return False
 
     def get_dynamic(self, name: str):
-        return self._dynamic_tools.get(name)
+        dynamic_tool = self._dynamic_tools.get(name)
+        if not dynamic_tool:
+            log.warning(f"Dynamic tool '{name}' not found in registry.")
+        return dynamic_tool
 
     def list_dynamic(self) -> List[str]:
         return list(self._dynamic_tools.keys())
