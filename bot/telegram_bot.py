@@ -53,61 +53,59 @@ class RateLimiter:
     """Simple token-bucket rate limiter per chat_id."""
 
     def __init__(self, rate: int = 10, per: float = 60.0) -> None:
-        self._rate    = rate
-        self._per     = per
+        self._rate = rate
+        self._per = per
         self._buckets: Dict[int, List[float]] = {}
 
     def is_allowed(self, chat_id: int) -> bool:
+        """Check if a chat_id is allowed to perform an action based on rate limits."""
         now = time.time()
         bucket = self._buckets.setdefault(chat_id, [])
         # Remove timestamps older than the window
-        self._buckets[chat_id] = [t for t in bucket if now - t < self._per]
-        if len(self._buckets[chat_id]) >= self._rate:
+        bucket = [t for t in bucket if now - t < self._per]
+        self._buckets[chat_id] = bucket
+        if len(bucket) >= self._rate:
             return False
-        self._buckets[chat_id].append(now)
+        bucket.append(now)
         return True
 
-
-# ---------------------------------------------------------------------------
-# Bot
-# ---------------------------------------------------------------------------
 
 class TelegramBot:
     """TASO Telegram control interface."""
 
     _COMMANDS = [
-        BotCommand("start",          "Welcome and authenticate"),
-        BotCommand("status",         "System and agent status"),
-        BotCommand("agents",         "List all agents"),
-        BotCommand("memory",         "Query the knowledge base"),
-        BotCommand("scan_repo",      "Scan a Git repository"),
-        BotCommand("security_scan",  "Run full security scan"),
-        BotCommand("code_audit",     "Audit a code snippet"),
-        BotCommand("threat_intel",   "Collect threat intelligence"),
-        BotCommand("update_self",    "Propose self-improvement patches"),
-        BotCommand("tools",          "List available tools"),
-        BotCommand("logs",           "View recent logs"),
-        BotCommand("system",         "Host system metrics"),
-        BotCommand("swarm_status",   "Show swarm execution status"),
-        BotCommand("swarm_agents",   "List all registered agents and load"),
-        BotCommand("swarm_models",   "Show model registry and routing"),
+        BotCommand("start", "Welcome and authenticate"),
+        BotCommand("status", "System and agent status"),
+        BotCommand("agents", "List all agents"),
+        BotCommand("memory", "Query the knowledge base"),
+        BotCommand("scan_repo", "Scan a Git repository"),
+        BotCommand("security_scan", "Run full security scan"),
+        BotCommand("code_audit", "Audit a code snippet"),
+        BotCommand("threat_intel", "Collect threat intelligence"),
+        BotCommand("update_self", "Propose self-improvement patches"),
+        BotCommand("tools", "List available tools"),
+        BotCommand("logs", "View recent logs"),
+        BotCommand("system", "Host system metrics"),
+        BotCommand("swarm_status", "Show swarm execution status"),
+        BotCommand("swarm_agents", "List all registered agents and load"),
+        BotCommand("swarm_models", "Show model registry and routing"),
         BotCommand("run_swarm_task", "Execute a task via the agent swarm"),
-        BotCommand("model_router",   "Show model routing configuration"),
-        BotCommand("system_status",  "Full system status overview"),
-        BotCommand("help",           "Show all commands"),
-        BotCommand("dev_status",     "Development system overview"),
-        BotCommand("dev_task",       "Submit a development task to the swarm"),
-        BotCommand("dev_tool",       "Request dynamic tool creation"),
-        BotCommand("dev_patch",      "Request code patch generation"),
-        BotCommand("dev_review",     "Review latest code change"),
-        BotCommand("dev_rollback",   "Rollback to previous stable version"),
-        BotCommand("dev_deploy",     "Deploy latest from GitHub"),
-        BotCommand("dev_memory",     "Query version history and logs"),
+        BotCommand("model_router", "Show model routing configuration"),
+        BotCommand("system_status", "Full system status overview"),
+        BotCommand("help", "Show all commands"),
+        BotCommand("dev_status", "Development system overview"),
+        BotCommand("dev_task", "Submit a development task to the swarm"),
+        BotCommand("dev_tool", "Request dynamic tool creation"),
+        BotCommand("dev_patch", "Request code patch generation"),
+        BotCommand("dev_review", "Review latest code change"),
+        BotCommand("dev_rollback", "Rollback to previous stable version"),
+        BotCommand("dev_deploy", "Deploy latest from GitHub"),
+        BotCommand("dev_memory", "Query version history and logs"),
         BotCommand("dev_suggestion", "Get bot self-improvement suggestions"),
-        BotCommand("models",     "Show registered LLM models"),
+        BotCommand("models", "Show registered LLM models"),
         BotCommand("learn_repo", "Learn from a GitHub repository URL"),
-        BotCommand("add_feature","Generate and register a new feature"),
-        BotCommand("create_agent","Autonomously generate and register a new agent"),
+        BotCommand("add_feature", "Generate and register a new feature"),
+        BotCommand("create_agent", "Autonomously generate and register a new agent"),
         BotCommand("create_tool", "Autonomously generate and register a new tool"),
     ]
 
@@ -118,18 +116,15 @@ class TelegramBot:
         conv_store: ConversationStore,
         tool_registry: Any,
     ) -> None:
-        self._bus         = bus
+        self._bus = bus
         self._coordinator = coordinator
-        self._conv        = conv_store
-        self._tools       = tool_registry
-        self._limiter     = RateLimiter(rate=20, per=60)
+        self._conv = conv_store
+        self._tools = tool_registry
+        self._limiter = RateLimiter(rate=20, per=60)
         self._app: Optional[Application] = None
 
-    # ------------------------------------------------------------------
-    # Startup / shutdown
-    # ------------------------------------------------------------------
-
     async def start(self) -> None:
+        """Start the Telegram bot."""
         if not settings.TELEGRAM_BOT_TOKEN:
             log.error("TELEGRAM_BOT_TOKEN is not set – Telegram bot will not start.")
             return
@@ -141,21 +136,20 @@ class TelegramBot:
                 .build()
             )
 
-            # Register handlers
             self._register_handlers()
 
-            # Set bot command menu
             await self._app.bot.set_my_commands(self._COMMANDS)
 
-            log.info("Telegram bot initialising...")
+            log.info("Telegram bot initializing...")
             await self._app.initialize()
             await self._app.start()
             await self._app.updater.start_polling(drop_pending_updates=True)
             log.info("Telegram bot is online.")
         except Exception as e:
-            log.error(f"Failed to start Telegram bot: {e}")
+            log.exception("Failed to start Telegram bot.", exc_info=e)
 
     async def stop(self) -> None:
+        """Stop the Telegram bot."""
         if self._app:
             try:
                 await self._app.updater.stop()
@@ -163,93 +157,83 @@ class TelegramBot:
                 await self._app.shutdown()
                 log.info("Telegram bot stopped.")
             except Exception as e:
-                log.error(f"Error during Telegram bot shutdown: {e}")
-
-    # ------------------------------------------------------------------
-    # Handler registration
-    # ------------------------------------------------------------------
+                log.exception("Error during Telegram bot shutdown.", exc_info=e)
 
     def _register_handlers(self) -> None:
+        """Register all command and message handlers."""
         if not self._app:
             log.error("Telegram application instance is not initialized.")
             return
 
         app = self._app
-        app.add_handler(CommandHandler("start",         self._cmd_start))
-        app.add_handler(CommandHandler("help",          self._cmd_help))
-        app.add_handler(CommandHandler("status",        self._cmd_status))
-        app.add_handler(CommandHandler("agents",        self._cmd_agents))
-        app.add_handler(CommandHandler("memory",        self._cmd_memory))
-        app.add_handler(CommandHandler("scan_repo",     self._cmd_scan_repo))
-        app.add_handler(CommandHandler("security_scan", self._cmd_security_scan))
-        app.add_handler(CommandHandler("code_audit",    self._cmd_code_audit))
-        app.add_handler(CommandHandler("threat_intel",  self._cmd_threat_intel))
-        app.add_handler(CommandHandler("update_self",   self._cmd_update_self))
-        app.add_handler(CommandHandler("tools",         self._cmd_tools))
-        app.add_handler(CommandHandler("logs",          self._cmd_logs))
-        app.add_handler(CommandHandler("system",        self._cmd_system))
-        app.add_handler(CommandHandler("swarm_status",   self._cmd_swarm_status))
-        app.add_handler(CommandHandler("swarm_agents",   self._cmd_swarm_agents))
-        app.add_handler(CommandHandler("swarm_models",   self._cmd_swarm_models))
-        app.add_handler(CommandHandler("run_swarm_task", self._cmd_run_swarm_task))
-        app.add_handler(CommandHandler("model_router",   self._cmd_model_router))
-        app.add_handler(CommandHandler("system_status",  self._cmd_system_status))
+        command_handlers = {
+            "start": self._cmd_start,
+            "help": self._cmd_help,
+            "status": self._cmd_status,
+            "agents": self._cmd_agents,
+            "memory": self._cmd_memory,
+            "scan_repo": self._cmd_scan_repo,
+            "security_scan": self._cmd_security_scan,
+            "code_audit": self._cmd_code_audit,
+            "threat_intel": self._cmd_threat_intel,
+            "update_self": self._cmd_update_self,
+            "tools": self._cmd_tools,
+            "logs": self._cmd_logs,
+            "system": self._cmd_system,
+            "swarm_status": self._cmd_swarm_status,
+            "swarm_agents": self._cmd_swarm_agents,
+            "swarm_models": self._cmd_swarm_models,
+            "run_swarm_task": self._cmd_run_swarm_task,
+            "model_router": self._cmd_model_router,
+            "system_status": self._cmd_system_status,
+            "dev_status": self._cmd_dev_status,
+            "dev_task": self._cmd_dev_task,
+            "dev_tool": self._cmd_dev_tool,
+            "dev_patch": self._cmd_dev_patch,
+            "dev_review": self._cmd_dev_review,
+            "dev_rollback": self._cmd_dev_rollback,
+            "dev_deploy": self._cmd_dev_deploy,
+            "dev_memory": self._cmd_dev_memory,
+            "dev_suggestion": self._cmd_dev_suggestion,
+            "models": self._cmd_models,
+            "learn_repo": self._cmd_learn_repo,
+            "add_feature": self._cmd_add_feature,
+            "create_agent": self._cmd_create_agent,
+            "create_tool": self._cmd_create_tool,
+            "dev_sync": self._cmd_dev_sync,
+            "dev_health": self._cmd_dev_health,
+            "dev_lifecycle": self._cmd_dev_lifecycle,
+            "dev_branches": self._cmd_dev_branches,
+            "profile": self._cmd_profile,
+            "plugins": self._cmd_plugins,
+            "activate": self._cmd_activate,
+            "deactivate": self._cmd_deactivate,
+            "crawl_start": self._cmd_crawl_start,
+            "crawl_stop": self._cmd_crawl_stop,
+            "crawl_status": self._cmd_crawl_status,
+            "crawl_add": self._cmd_crawl_add,
+            "crawl_search": self._cmd_crawl_search,
+            "crawl_onions": self._cmd_crawl_onions,
+        }
 
-        app.add_handler(CommandHandler("dev_status",     self._cmd_dev_status))
-        app.add_handler(CommandHandler("dev_task",       self._cmd_dev_task))
-        app.add_handler(CommandHandler("dev_tool",       self._cmd_dev_tool))
-        app.add_handler(CommandHandler("dev_patch",      self._cmd_dev_patch))
-        app.add_handler(CommandHandler("dev_review",     self._cmd_dev_review))
-        app.add_handler(CommandHandler("dev_rollback",   self._cmd_dev_rollback))
-        app.add_handler(CommandHandler("dev_deploy",     self._cmd_dev_deploy))
-        app.add_handler(CommandHandler("dev_memory",     self._cmd_dev_memory))
-        app.add_handler(CommandHandler("dev_suggestion", self._cmd_dev_suggestion))
-        app.add_handler(CommandHandler("models",      self._cmd_models))
-        app.add_handler(CommandHandler("learn_repo",  self._cmd_learn_repo))
-        app.add_handler(CommandHandler("add_feature", self._cmd_add_feature))
-        app.add_handler(CommandHandler("create_agent",   self._cmd_create_agent))
-        app.add_handler(CommandHandler("create_tool",    self._cmd_create_tool))
-        # Git dev-lifecycle commands (DEVELOPMENT_RULES.md)
-        app.add_handler(CommandHandler("dev_sync",       self._cmd_dev_sync))
-        app.add_handler(CommandHandler("dev_health",     self._cmd_dev_health))
-        app.add_handler(CommandHandler("dev_lifecycle",  self._cmd_dev_lifecycle))
-        app.add_handler(CommandHandler("dev_branches",   self._cmd_dev_branches))
-        # Personalisation commands
-        app.add_handler(CommandHandler("profile",     self._cmd_profile))
-        app.add_handler(CommandHandler("plugins",     self._cmd_plugins))
-        app.add_handler(CommandHandler("activate",    self._cmd_activate))
-        app.add_handler(CommandHandler("deactivate",  self._cmd_deactivate))
-        # Crawler commands
-        app.add_handler(CommandHandler("crawl_start",  self._cmd_crawl_start))
-        app.add_handler(CommandHandler("crawl_stop",   self._cmd_crawl_stop))
-        app.add_handler(CommandHandler("crawl_status", self._cmd_crawl_status))
-        app.add_handler(CommandHandler("crawl_add",    self._cmd_crawl_add))
-        app.add_handler(CommandHandler("crawl_search", self._cmd_crawl_search))
-        app.add_handler(CommandHandler("crawl_onions", self._cmd_crawl_onions))
+        for command, handler in command_handlers.items():
+            app.add_handler(CommandHandler(command, handler))
 
-        # Inline keyboard callbacks
         app.add_handler(CallbackQueryHandler(self._callback_query))
-
-        # Free-text messages → LLM conversation
         app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
         )
 
-    # ------------------------------------------------------------------
-    # Guards
-    # ------------------------------------------------------------------
-
     def _is_admin(self, user_id: int, username: str = "") -> bool:
         """
-        Return True if the user is an authorised admin.
-        Checks both numeric user IDs and Telegram usernames (case-insensitive).
-        If neither list is configured, all users are treated as admins (open mode).
+        Check if the user is an authorized admin.
+        Returns True if the user is an admin, otherwise False.
         """
-        has_id_list       = bool(settings.TELEGRAM_ADMIN_IDS)
+        has_id_list = bool(settings.TELEGRAM_ADMIN_IDS)
         has_username_list = bool(settings.TELEGRAM_ADMIN_USERNAMES)
 
         if not has_id_list and not has_username_list:
-            return True  # open mode – no admins configured
+            return True  # Open mode – no admins configured
 
         if has_id_list and user_id in settings.TELEGRAM_ADMIN_IDS:
             return True
@@ -260,33 +244,37 @@ class TelegramBot:
         return False
 
     async def _guard(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
-        admin_required: bool = False,
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, admin_required: bool = False
     ) -> bool:
-        """Return True if the request should proceed."""
-        chat_id  = update.effective_chat.id
-        user     = update.effective_user
+        """
+        Validate if the request should proceed based on rate limits and admin status.
+        """
+        chat_id = update.effective_chat.id
+        user = update.effective_user
         username = (user.username or "").lower()
 
         if not self._limiter.is_allowed(chat_id):
-            await update.message.reply_text("⏳ Rate limit exceeded. Please wait.")
+            await self._send_message(update, "⏳ Rate limit exceeded. Please wait.")
             return False
 
         if admin_required and not self._is_admin(user.id, username):
-            await update.message.reply_text(
-                "🔒 This command is restricted to administrators."
+            await self._send_message(
+                update, "🔒 This command is restricted to administrators."
             )
             log.warning(
-                f"Unauthorised attempt: user_id={user.id} "
-                f"username=@{username} command={update.message.text}"
+                f"Unauthorized attempt: user_id={user.id}, "
+                f"username=@{username}, command={update.message.text}"
             )
             return False
 
         return True
 
-    # ------------------------------------------------------------------
-    # Command handlers
-    # ------------------------------------------------------------------
+    async def _send_message(self, update: Update, text: str) -> None:
+        """Send a message to the user with error handling."""
+        try:
+            await update.message.reply_text(text)
+        except Exception as e:
+            log.exception("Failed to send message to user.", exc_info=e)
 
     async def _cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user     = update.effective_user
@@ -1083,6 +1071,10 @@ class TelegramBot:
         if response:
             await self._conv.add_message(chat_id, "assistant", response[:800])
             await self._reply_long(update, response)
+        else:
+            # Handler replied directly — store a brief record for history continuity
+            label = self._INTENT_LABELS.get(intent, intent.replace("_", " ").title())
+            await self._conv.add_message(chat_id, "assistant", f"[{label}]")
 
         # --- Send personalisation notifications (plugin unlocks, style changes) ---
         if pctx and pctx.notifications:
@@ -1235,12 +1227,9 @@ class TelegramBot:
         # ── 1. Classify what kind of context will help ──────────────────────
         tl = text.lower()
         wants_memory = any(w in tl for w in (
-            "cve", "vuln", "exploit", "threat", "malware", "ransomware",
-            "zero-day", "patch", "advisory", "breach", "attack", "payload",
-            "injection", "xss", "rce", "sqli", "lfi", "rfi", "bypass",
-            "pentest", "red team", "osint", "ioc", "ttps", "mitre",
-            "what is", "tell me about", "explain", "how does", "how do",
-            "what are", "latest", "recent", "news", "research",
+            "cve", "exploit", "vulnerability", "malware", "threat",
+            "breach", "ransomware", "zero-day", "advisory",
+            "pentest", "ttps", "mitre",
         ))
         wants_system = any(w in tl for w in (
             "cpu", "ram", "memory", "disk", "uptime", "load", "process",

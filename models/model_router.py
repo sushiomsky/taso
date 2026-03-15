@@ -144,6 +144,12 @@ class ModelRouter:
         backend = settings.LLM_BACKEND
 
         try:
+            # For general chat, prefer the uncensored model as primary
+            if task_type == TaskType.GENERAL:
+                uncensored = self._reg.uncensored_model()
+                if uncensored and uncensored.available:
+                    return uncensored
+
             if backend == "copilot":
                 entry = self._reg.get(settings.COPILOT_MODEL)
                 if entry and entry.available:

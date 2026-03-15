@@ -112,7 +112,8 @@ async def tg_send(session: aiohttp.ClientSession, text: str) -> None:
 
 # ─── LLM helper ────────────────────────────────────────────────────────────────
 async def llm_query(session: aiohttp.ClientSession, system: str, user: str) -> str:
-    """Call GPT-4o via GitHub Models inference."""
+    """Call GPT-4o via GitHub Models; fall back to Ollama on 429/error."""
+    # 1. Try GitHub Models
     url = "https://models.github.ai/inference/chat/completions"
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -122,25 +123,47 @@ async def llm_query(session: aiohttp.ClientSession, system: str, user: str) -> s
         "model": "openai/gpt-4o",
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "user",   "content": user},
         ],
         "temperature": 0.2,
         "max_tokens": 3000,
     }
     try:
-        async with session.post(
-            url, headers=headers, json=payload,
-            timeout=aiohttp.ClientTimeout(total=90)
-        ) as r:
-            if r.status != 200:
-                body = await r.text()
-                log.warning(f"LLM error {r.status}: {body[:300]}")
-                return ""
-            data = await r.json()
-            return data["choices"][0]["message"]["content"]
+        async with session.post(url, headers=headers, json=payload,
+                                timeout=aiohttp.ClientTimeout(total=90)) as r:
+            if r.status == 200:
+                data = await r.json()
+                return data["choices"][0]["message"]["content"]
+            body = await r.text()
+            log.warning(f"GitHub Models {r.status}: {body[:200]} — trying Ollama fallback")
     except Exception as e:
-        log.error(f"LLM query failed: {e}")
-        return ""
+        log.warning(f"GitHub Models request failed: {e} — trying Ollama fallback")
+
+    # 2. Ollama fallback (uncensored model)
+    ollama_model = os.environ.get("OLLAMA_UNCENSORED_MODEL", "dolphin-mistral")
+    ollama_url   = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434") + "/api/chat"
+    try:
+        async with session.post(
+            ollama_url,
+            json={
+                "model":    ollama_model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user},
+                ],
+                "stream": False,
+            },
+            timeout=aiohttp.ClientTimeout(total=120),
+        ) as r:
+            if r.status == 200:
+                data = await r.json()
+                return data["message"]["content"]
+            body = await r.text()
+            log.error(f"Ollama fallback also failed {r.status}: {body[:200]}")
+    except Exception as e:
+        log.error(f"Ollama fallback failed: {e}")
+
+    return ""
 
 
 # Token budget: GitHub Models gpt-4o limit ~8000 tokens total.

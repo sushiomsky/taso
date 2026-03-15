@@ -56,6 +56,7 @@ class MonitoringAgent(BaseAgent):
         self._alerts:    List[Dict]  = []
         self._start_time: float      = time.time()
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._last_alert: Dict[str, float] = {}
 
     async def start(self) -> None:
         await super().start()
@@ -205,13 +206,18 @@ class MonitoringAgent(BaseAgent):
     def _check_thresholds(self, snap: Dict) -> None:
         """Emit an internal alert if resource usage is critical."""
         thresholds = [
-            ("cpu_pct",  90, "CPU usage critical"),
-            ("mem_pct",  90, "Memory usage critical"),
+            ("cpu_pct",  96, "CPU usage critical"),
+            ("mem_pct",  95, "Memory usage critical"),
             ("disk_pct", 95, "Disk usage critical"),
         ]
+        now = time.time()
         for key, limit, msg in thresholds:
             val = snap.get(key, 0)
             if isinstance(val, (int, float)) and val >= limit:
+                last = self._last_alert.get(key, 0)
+                if now - last < 300:
+                    continue
+                self._last_alert[key] = now
                 self._alerts.append({
                     "ts":      snap["ts"],
                     "source":  "monitoring_agent",
