@@ -27,10 +27,10 @@ def make_version_id(prefix: str = "v") -> str:
 @dataclass
 class VersionRecord:
     version_id: str
-    commit_sha: Optional[str]
     author_agent: str
     change_type: str        # "patch" | "tool_add" | "tool_update" | "agent_add" | "config"
     description: str
+    commit_sha: Optional[str] = None
     files_changed: List[str] = field(default_factory=list)
     test_passed: bool = False
     deployed: bool = False

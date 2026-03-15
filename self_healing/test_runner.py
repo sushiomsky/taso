@@ -109,3 +109,32 @@ async def _run_python(code: str, timeout: int = 30) -> Tuple[bool, str]:
         return False, f"[timeout after {timeout}s]"
     out = (stdout + stderr).decode(errors="replace").strip()
     return proc.returncode == 0, out
+
+
+class TestRunner:
+    """
+    Class wrapper around the module-level test functions.
+    Allows agents and tests to use a consistent object interface.
+    """
+
+    async def run_smoke(self) -> Tuple[bool, str]:
+        return await run_smoke_test()
+
+    async def run_pytest(self, test_dir: str = "tests") -> Tuple[bool, str]:
+        return await run_pytest(test_dir)
+
+    async def run_syntax_check(self, files: list = None) -> Tuple[bool, str]:
+        return await run_syntax_check(files)
+
+    async def syntax_check_code(self, code: str) -> Tuple[bool, list]:
+        """
+        Check Python syntax of a raw code string.
+        Returns (passed: bool, errors: List[str]).
+        """
+        import ast
+        errors: list = []
+        try:
+            ast.parse(code)
+        except SyntaxError as e:
+            errors.append(f"SyntaxError at line {e.lineno}: {e.msg}")
+        return len(errors) == 0, errors

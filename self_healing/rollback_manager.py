@@ -17,9 +17,9 @@ log = get_logger("rollback_manager")
 
 
 class RollbackManager:
-    def __init__(self) -> None:
+    def __init__(self, error_threshold: int = 3) -> None:
         self._error_count = 0
-        self._error_threshold = 3
+        self._error_threshold = error_threshold
         self._rollback_log: List[dict] = []
         self._last_rollback_time = 0.0
         self._debounce_interval = 300  # seconds
@@ -29,8 +29,7 @@ class RollbackManager:
         Record an error. If threshold exceeded, trigger rollback.
         Returns rollback SHA if rollback was triggered, else None.
         """
-        self._error_count += 1
-        log.warning(f"RollbackManager: error #{self._error_count} — {context}")
+        self._increment_error(context)
 
         if self._error_count >= self._error_threshold:
             if self._is_debounce_active():
@@ -39,11 +38,22 @@ class RollbackManager:
             return await self._trigger_rollback(reason=f"Auto-rollback: {context}")
         return None
 
+    def _increment_error(self, context: str) -> None:
+        """Increment error counter (sync, safe to call from tests)."""
+        self._error_count += 1
+        log.warning(f"RollbackManager: error #{self._error_count} — {context}")
+
     def reset_errors(self) -> None:
-        """
-        Reset the error count to zero.
-        """
+        """Reset the error count to zero."""
         self._error_count = 0
+
+    def reset(self) -> None:
+        """Alias for reset_errors — resets error counter after a rollback."""
+        self._error_count = 0
+
+    def should_rollback(self) -> bool:
+        """Return True if the error threshold has been reached."""
+        return self._error_count >= self._error_threshold
 
     async def rollback(self, reason: str = "manual rollback",
                        target_sha: Optional[str] = None) -> Optional[str]:
