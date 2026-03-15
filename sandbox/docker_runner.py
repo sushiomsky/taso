@@ -26,12 +26,12 @@ from config.logging_config import tool_log as log
 
 @dataclass
 class ContainerResult:
-    exit_code:  int
-    stdout:     str
-    stderr:     str
-    timed_out:  bool        = False
-    container_id: str       = ""
-    error:      Optional[str] = None
+    exit_code: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+    container_id: str = ""
+    error: Optional[str] = None
 
     @property
     def success(self) -> bool:
@@ -50,8 +50,8 @@ def _default_network_mode(force_network: Optional[bool] = None) -> str:
 
 async def run_code(
     code: str,
-    image: str          = "",
-    timeout: int        = 0,
+    image: str = "",
+    timeout: int = 0,
     env: Dict[str, str] = {},
     packages: List[str] = [],
     network: Optional[bool] = None,
@@ -65,7 +65,7 @@ async def run_code(
 
     Packages are pip-installed before the script runs when provided.
     """
-    image   = image   or settings.DOCKER_SANDBOX_IMAGE
+    image = image or settings.DOCKER_SANDBOX_IMAGE
     timeout = timeout or settings.DOCKER_TIMEOUT
 
     # If packages requested and network disabled, enable network automatically
@@ -74,42 +74,51 @@ async def run_code(
         network = True
 
     # Write code to temp file
-    with tempfile.NamedTemporaryFile(
-        suffix=".py", mode="w", delete=False, prefix="taso_"
-    ) as fh:
-        fh.write(code)
-        code_file = Path(fh.name)
-
-    container_name = f"taso_{uuid.uuid4().hex[:8]}"
-
     try:
+        with tempfile.NamedTemporaryFile(
+            suffix=".py", mode="w", delete=False, prefix="taso_"
+        ) as fh:
+            fh.write(code)
+            code_file = Path(fh.name)
+
+        container_name = f"taso_{uuid.uuid4().hex[:8]}"
+
         return await _docker_run(
-            image         = image,
-            name          = container_name,
-            code_file     = code_file,
-            timeout       = timeout,
-            env           = env,
-            packages      = packages,
-            network_mode  = _default_network_mode(network),
+            image=image,
+            name=container_name,
+            code_file=code_file,
+            timeout=timeout,
+            env=env,
+            packages=packages,
+            network_mode=_default_network_mode(network),
+        )
+    except Exception as exc:
+        log.error(f"Error in run_code: {exc}")
+        return ContainerResult(
+            exit_code=-1, stdout="", stderr="", error=str(exc)
         )
     finally:
-        code_file.unlink(missing_ok=True)
+        try:
+            if 'code_file' in locals():
+                code_file.unlink(missing_ok=True)
+        except Exception as exc:
+            log.warning(f"Failed to delete temp file: {exc}")
         await _force_remove(container_name)
 
 
 async def run_command(
     command: List[str],
-    image: str          = "",
-    workdir: str        = "/workspace",
-    timeout: int        = 0,
+    image: str = "",
+    workdir: str = "/workspace",
+    timeout: int = 0,
     env: Dict[str, str] = {},
-    mounts: Dict[str, str] = {},   # {host_path: container_path}
+    mounts: Dict[str, str] = {},  # {host_path: container_path}
     network: Optional[bool] = None,
 ) -> ContainerResult:
     """Run an arbitrary command in a throwaway container."""
-    image   = image   or settings.DOCKER_SANDBOX_IMAGE
+    image = image or settings.DOCKER_SANDBOX_IMAGE
     timeout = timeout or settings.DOCKER_TIMEOUT
-    name    = f"taso_{uuid.uuid4().hex[:8]}"
+    name = f"taso_{uuid.uuid4().hex[:8]}"
 
     cmd = [
         "docker", "run", "--rm",
@@ -143,12 +152,15 @@ async def pull_image(image: str = "") -> bool:
             stderr=asyncio.subprocess.PIPE,
         )
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-        ok = proc.returncode == 0
-        if ok:
+        if proc.returncode == 0:
             log.info(f"Docker image ready: {image}")
+            return True
         else:
-            log.warning(f"docker pull failed: {stderr.decode()[:200]}")
-        return ok
+            log.warning(f"docker pull failed: {stderr.decode(errors='replace')[:200]}")
+            return False
+    except asyncio.TimeoutError:
+        log.error(f"Docker pull timed out for image: {image}")
+        return False
     except Exception as exc:
         log.error(f"pull_image error: {exc}")
         return False
@@ -203,17 +215,17 @@ async def _run_docker_cmd(cmd: List[str], name: str, timeout: int) -> ContainerR
             proc.communicate(), timeout=float(timeout) + 5
         )
         return ContainerResult(
-            exit_code    = proc.returncode,
-            stdout       = stdout.decode(errors="replace")[:20_000],
-            stderr       = stderr.decode(errors="replace")[:2_000],
-            container_id = name,
+            exit_code=proc.returncode,
+            stdout=stdout.decode(errors="replace")[:20_000],
+            stderr=stderr.decode(errors="replace")[:2_000],
+            container_id=name,
         )
     except asyncio.TimeoutError:
         await _force_remove(name)
         return ContainerResult(
-            exit_code=  -1, stdout="", stderr="",
-            timed_out=  True,
-            error=      f"Timed out after {timeout}s",
+            exit_code=-1, stdout="", stderr="",
+            timed_out=True,
+            error=f"Timed out after {timeout}s",
             container_id=name,
         )
     except FileNotFoundError:
@@ -222,6 +234,7 @@ async def _run_docker_cmd(cmd: List[str], name: str, timeout: int) -> ContainerR
             error="Docker not found in PATH",
         )
     except Exception as exc:
+        log.error(f"Unexpected error in _run_docker_cmd: {exc}")
         return ContainerResult(
             exit_code=-1, stdout="", stderr="",
             error=str(exc),
@@ -236,5 +249,7 @@ async def _force_remove(name: str) -> None:
             stderr=asyncio.subprocess.DEVNULL,
         )
         await asyncio.wait_for(proc.wait(), timeout=10)
-    except Exception:
-        pass
+    except asyncio.TimeoutError:
+        log.warning(f"Timeout while force-removing container: {name}")
+    except Exception as exc:
+        log.warning(f"Error during force-remove of container {name}: {exc}")
