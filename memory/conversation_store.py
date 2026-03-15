@@ -64,8 +64,8 @@ class ConversationStore:
             await self._conn.commit()
             log.info(f"ConversationStore connected: {self._path}")
         except Exception as e:
-            log.error(f"Failed to connect to ConversationStore: {e}")
-            raise
+            log.exception("Failed to connect to ConversationStore", exc_info=e)
+            raise RuntimeError("Could not connect to the conversation store.") from e
 
     async def close(self) -> None:
         if self._conn:
@@ -73,8 +73,8 @@ class ConversationStore:
                 await self._conn.close()
                 self._conn = None
             except Exception as e:
-                log.error(f"Failed to close ConversationStore connection: {e}")
-                raise
+                log.exception("Failed to close ConversationStore connection", exc_info=e)
+                raise RuntimeError("Could not close the conversation store connection.") from e
 
     async def __aenter__(self) -> "ConversationStore":
         await self.connect()
@@ -89,20 +89,23 @@ class ConversationStore:
 
     async def add_message(self, chat_id: int, role: str, content: str) -> None:
         """Append one turn to the conversation."""
+        if not self._conn:
+            raise RuntimeError("Database connection is not established.")
         try:
             await self._conn.execute(
                 "INSERT INTO conversations (chat_id, role, content) VALUES (?,?,?)",
                 (chat_id, role, content),
             )
             await self._conn.commit()
-            # Trim old messages beyond MAX_MESSAGES
             await self._trim(chat_id)
         except Exception as e:
-            log.error(f"Failed to add message to ConversationStore: {e}")
-            raise
+            log.exception(f"Failed to add message to ConversationStore for chat_id {chat_id}", exc_info=e)
+            raise RuntimeError("Could not add message to the conversation store.") from e
 
     async def get_history(self, chat_id: int, limit: int = 20) -> List[Dict[str, str]]:
         """Return the most recent *limit* messages as dicts."""
+        if not self._conn:
+            raise RuntimeError("Database connection is not established.")
         try:
             cur = await self._conn.execute(
                 """SELECT role, content, ts FROM conversations
@@ -110,11 +113,10 @@ class ConversationStore:
                 (chat_id, limit),
             )
             rows = await cur.fetchall()
-            # Reverse so oldest comes first
             return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
         except Exception as e:
-            log.error(f"Failed to retrieve conversation history: {e}")
-            raise
+            log.exception(f"Failed to retrieve conversation history for chat_id {chat_id}", exc_info=e)
+            raise RuntimeError("Could not retrieve conversation history.") from e
 
     async def get_context(self, chat_id: int) -> List[Dict[str, str]]:
         """
@@ -122,6 +124,8 @@ class ConversationStore:
         Includes the stored summary (if any) as a system message, followed
         by the most recent raw messages.
         """
+        if not self._conn:
+            raise RuntimeError("Database connection is not established.")
         try:
             messages: List[Dict[str, str]] = []
 
@@ -134,11 +138,13 @@ class ConversationStore:
             messages.extend(await self.get_history(chat_id, limit=10))
             return messages
         except Exception as e:
-            log.error(f"Failed to retrieve conversation context: {e}")
-            raise
+            log.exception(f"Failed to retrieve conversation context for chat_id {chat_id}", exc_info=e)
+            raise RuntimeError("Could not retrieve conversation context.") from e
 
     async def clear(self, chat_id: int) -> None:
         """Delete all messages for a chat."""
+        if not self._conn:
+            raise RuntimeError("Database connection is not established.")
         try:
             await self._conn.execute(
                 "DELETE FROM conversations WHERE chat_id=?", (chat_id,)
@@ -148,14 +154,16 @@ class ConversationStore:
             )
             await self._conn.commit()
         except Exception as e:
-            log.error(f"Failed to clear conversation for chat_id {chat_id}: {e}")
-            raise
+            log.exception(f"Failed to clear conversation for chat_id {chat_id}", exc_info=e)
+            raise RuntimeError(f"Could not clear conversation for chat_id {chat_id}.") from e
 
     # ------------------------------------------------------------------
     # Summaries
     # ------------------------------------------------------------------
 
     async def save_summary(self, chat_id: int, summary: str) -> None:
+        if not self._conn:
+            raise RuntimeError("Database connection is not established.")
         try:
             await self._conn.execute(
                 """INSERT INTO conversation_summaries (chat_id, summary)
@@ -167,10 +175,12 @@ class ConversationStore:
             )
             await self._conn.commit()
         except Exception as e:
-            log.error(f"Failed to save summary for chat_id {chat_id}: {e}")
-            raise
+            log.exception(f"Failed to save summary for chat_id {chat_id}", exc_info=e)
+            raise RuntimeError(f"Could not save summary for chat_id {chat_id}.") from e
 
     async def get_summary(self, chat_id: int) -> Optional[str]:
+        if not self._conn:
+            raise RuntimeError("Database connection is not established.")
         try:
             cur = await self._conn.execute(
                 "SELECT summary FROM conversation_summaries WHERE chat_id=?",
@@ -179,14 +189,16 @@ class ConversationStore:
             row = await cur.fetchone()
             return row["summary"] if row else None
         except Exception as e:
-            log.error(f"Failed to retrieve summary for chat_id {chat_id}: {e}")
-            raise
+            log.exception(f"Failed to retrieve summary for chat_id {chat_id}", exc_info=e)
+            raise RuntimeError(f"Could not retrieve summary for chat_id {chat_id}.") from e
 
     # ------------------------------------------------------------------
     # Stats
     # ------------------------------------------------------------------
 
     async def chat_stats(self, chat_id: int) -> Dict[str, Any]:
+        if not self._conn:
+            raise RuntimeError("Database connection is not established.")
         try:
             cur = await self._conn.execute(
                 "SELECT COUNT(*) as total FROM conversations WHERE chat_id=?",
@@ -195,8 +207,8 @@ class ConversationStore:
             row = await cur.fetchone()
             return {"total_messages": row["total"], "chat_id": chat_id}
         except Exception as e:
-            log.error(f"Failed to retrieve chat stats for chat_id {chat_id}: {e}")
-            raise
+            log.exception(f"Failed to retrieve chat stats for chat_id {chat_id}", exc_info=e)
+            raise RuntimeError(f"Could not retrieve chat stats for chat_id {chat_id}.") from e
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -204,6 +216,8 @@ class ConversationStore:
 
     async def _trim(self, chat_id: int) -> None:
         """Keep only the most recent MAX_MESSAGES rows per chat."""
+        if not self._conn:
+            raise RuntimeError("Database connection is not established.")
         try:
             await self._conn.execute(
                 """DELETE FROM conversations WHERE chat_id=? AND id NOT IN (
@@ -213,5 +227,5 @@ class ConversationStore:
             )
             await self._conn.commit()
         except Exception as e:
-            log.error(f"Failed to trim conversation for chat_id {chat_id}: {e}")
-            raise
+            log.exception(f"Failed to trim conversation for chat_id {chat_id}", exc_info=e)
+            raise RuntimeError(f"Could not trim conversation for chat_id {chat_id}.") from e
