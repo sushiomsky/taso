@@ -1658,10 +1658,12 @@ class TelegramBot:
 
     async def _dispatch(self, topic: str, payload: Dict) -> Dict[str, Any]:
         """Publish a bus message directly to a topic and await the response."""
+        reply_topic = f"bot.reply.{topic}.{int(time.time())}"
         msg = BusMessage(
-            topic   = topic,
-            sender  = "telegram_bot",
-            payload = payload,
+            topic    = topic,
+            sender   = "telegram_bot",
+            payload  = payload,
+            reply_to = reply_topic,
         )
         response = await self._bus.publish_and_wait(msg, timeout=90.0)
         if response is None:
