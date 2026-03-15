@@ -14,6 +14,7 @@ from config.settings import settings
 from self_healing.git_manager import git_pull, git_current_sha, git_commit, git_tag, git_push
 from self_healing.test_runner import run_smoke_test, run_syntax_check
 from self_healing.rollback_manager import rollback_manager
+from self_healing.version_tagger import version_tagger
 
 log = get_logger("deploy_manager")
 
@@ -26,7 +27,8 @@ class DeployManager:
     async def bootstrap(self) -> bool:
         """
         Called at startup. Pulls latest from GitHub if configured,
-        runs smoke tests, and marks deployment.
+        runs health checks + smoke tests, and marks deployment.
+        Falls back to last stable tag if health checks fail.
         Returns True if deployment is good.
         """
         try:
@@ -45,6 +47,25 @@ class DeployManager:
                 log.warning("Git pull failed — using local version.")
                 self._deployed_sha = await self._safe_get_current_sha()
                 return True  # Continue with the local version
+
+            # Run health checks; if critical failure → rollback to last stable tag
+            try:
+                from self_healing.health_checker import health_checker
+                report = await health_checker.check_all(quick=True)
+                if not report.passed:
+                    log.error(
+                        f"Health checks failed after pull: {report.failed_checks}. "
+                        "Checking out last stable tag…"
+                    )
+                    last_tag = await version_tagger.get_latest_tag()
+                    if last_tag:
+                        from self_healing.git_manager import git_checkout
+                        await git_checkout(last_tag)
+                        log.info(f"Rolled back to {last_tag}")
+                    self._deployed_sha = await self._safe_get_current_sha()
+                    return False
+            except Exception as hc_exc:
+                log.warning(f"Health checker unavailable during bootstrap: {hc_exc}")
 
             if not await self._run_smoke_tests("after pull"):
                 await rollback_manager.rollback(reason="Failed smoke test after git pull")

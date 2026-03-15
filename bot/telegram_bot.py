@@ -207,8 +207,13 @@ class TelegramBot:
         app.add_handler(CommandHandler("models",      self._cmd_models))
         app.add_handler(CommandHandler("learn_repo",  self._cmd_learn_repo))
         app.add_handler(CommandHandler("add_feature", self._cmd_add_feature))
-        app.add_handler(CommandHandler("create_agent", self._cmd_create_agent))
-        app.add_handler(CommandHandler("create_tool",  self._cmd_create_tool))
+        app.add_handler(CommandHandler("create_agent",   self._cmd_create_agent))
+        app.add_handler(CommandHandler("create_tool",    self._cmd_create_tool))
+        # Git dev-lifecycle commands (DEVELOPMENT_RULES.md)
+        app.add_handler(CommandHandler("dev_sync",       self._cmd_dev_sync))
+        app.add_handler(CommandHandler("dev_health",     self._cmd_dev_health))
+        app.add_handler(CommandHandler("dev_lifecycle",  self._cmd_dev_lifecycle))
+        app.add_handler(CommandHandler("dev_branches",   self._cmd_dev_branches))
 
         # Inline keyboard callbacks
         app.add_handler(CallbackQueryHandler(self._callback_query))
@@ -1510,3 +1515,128 @@ class TelegramBot:
         except Exception as exc:
             log.exception("create_tool command error")
             await update.message.reply_text(f"❌ Error: {exc}")
+
+    # ------------------------------------------------------------------
+    # /dev_sync – sync repo to latest main (DEVELOPMENT_RULES.md §1)
+    # ------------------------------------------------------------------
+
+    async def _cmd_dev_sync(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if not await self._guard(update, ctx):
+            return
+        try:
+            await update.message.reply_text("🔄 Syncing repository to latest main…")
+            from self_healing.dev_lifecycle import dev_lifecycle
+            result = await dev_lifecycle.sync_repo()
+
+            nc = result.get("new_commits", [])
+            sha_before = result.get("previous_sha", "?")[:8]
+            sha_after  = result.get("current_sha",  "?")[:8]
+            status     = "✅ Synced" if result.get("success") else "⚠️ Partial"
+
+            commit_lines = "\n".join(
+                f"  • `{c['sha'][:8]}` {c['message'][:60]}" for c in nc[:5]
+            ) or "  _(no new commits)_"
+
+            msg = (
+                f"{status}\n"
+                f"SHA: `{sha_before}` → `{sha_after}`\n\n"
+                f"*New commits ({len(nc)}):*\n{commit_lines}"
+            )
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        except Exception as exc:
+            log.exception("dev_sync error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    # ------------------------------------------------------------------
+    # /dev_health – run health checks and report
+    # ------------------------------------------------------------------
+
+    async def _cmd_dev_health(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if not await self._guard(update, ctx):
+            return
+        try:
+            await update.message.reply_text("🩺 Running health checks…")
+            from self_healing.health_checker import health_checker
+            report = await health_checker.check_all()
+            icon   = "✅" if report.passed else "❌"
+            await self._reply_long(
+                update,
+                f"{icon} *Health Report* ({report.duration()}s)\n\n"
+                f"```\n{report.summary()}\n```",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as exc:
+            log.exception("dev_health error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    # ------------------------------------------------------------------
+    # /dev_lifecycle <description> – run full dev pipeline for a change
+    # ------------------------------------------------------------------
+
+    async def _cmd_dev_lifecycle(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if not await self._guard(update, ctx):
+            return
+        try:
+            description = " ".join(ctx.args) if ctx.args else ""
+            if not description:
+                await update.message.reply_text(
+                    "🔁 *Dev Lifecycle*\n\n"
+                    "Usage: `/dev_lifecycle <description>`\n\n"
+                    "Example: `/dev_lifecycle refactor sandbox timeout handling`\n\n"
+                    "This will trigger a full automated dev cycle:\n"
+                    "sync → branch → implement → test → health → commit → merge",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            await update.message.reply_text(
+                f"🔁 Starting dev lifecycle for:\n_{description}_\n\n"
+                "Running: sync → branch → implement → test → health → risk → commit → merge…",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+
+            result = await self._dispatch("developer.dev_cycle", {
+                "description": description,
+                "action":      "run_lifecycle",
+            })
+
+            text = result.get("summary", result.get("result", result.get("error", "No response")))
+            await self._reply_long(
+                update,
+                f"🔁 *Dev Lifecycle Result*\n\n```\n{text}\n```",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as exc:
+            log.exception("dev_lifecycle error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    # ------------------------------------------------------------------
+    # /dev_branches – list active feature branches
+    # ------------------------------------------------------------------
+
+    async def _cmd_dev_branches(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if not await self._guard(update, ctx):
+            return
+        try:
+            from self_healing.git_manager import git_list_branches
+            branches = await git_list_branches()
+            dev_branches = [b for b in branches if b.startswith("bot/dev/")]
+            if not dev_branches:
+                await update.message.reply_text("🌿 No active `bot/dev/*` feature branches.")
+                return
+            lines = "\n".join(f"  • `{b}`" for b in dev_branches)
+            await update.message.reply_text(
+                f"🌿 *Active feature branches ({len(dev_branches)}):*\n{lines}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as exc:
+            log.exception("dev_branches error")
+            await update.message.reply_text(f"❌ {exc}")
