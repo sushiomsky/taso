@@ -123,6 +123,28 @@ class BaseAgent(ABC):
             "active_tasks": len(self._tasks),
         }
 
+    # ------------------------------------------------------------------
+    # Tool helpers
+    # ------------------------------------------------------------------
+
+    async def call_tool(self, name: str, **kwargs: Any) -> Dict[str, Any]:
+        """
+        Execute a registered tool (static or dynamic) by name.
+        Returns dict with {success, result, error}.
+        """
+        from tools.base_tool import registry as tool_registry
+        return await tool_registry.call_tool(name, **kwargs)
+
+    def tool_exists(self, name: str) -> bool:
+        """Return True if a tool (static or dynamic) is registered under name."""
+        from tools.base_tool import registry as tool_registry
+        return tool_registry.tool_exists(name)
+
+    def list_available_tools(self) -> List[Dict[str, Any]]:
+        """Return descriptions for all registered tools (static + dynamic)."""
+        from tools.base_tool import registry as tool_registry
+        return tool_registry.describe_all_tools()
+
 
 # ---------------------------------------------------------------------------
 # LLM backend helpers

@@ -41,8 +41,10 @@ class DeveloperAgent(BaseAgent):
     description = "Generates code, patches, and new tools via multi-model LLM orchestration."
 
     async def _register_subscriptions(self) -> None:
-        self._bus.subscribe("developer.*",      self._handle_dev_request)
+        self._bus.subscribe("developer.*",            self._handle_dev_request)
         self._bus.subscribe("developer.create_agent", self._handle_create_agent)
+        # Also accept the generic "developer.request" topic used by PlannerAgent
+        self._bus.subscribe("developer.request",      self._handle_dev_request)
 
     async def _handle_dev_request(self, msg: BusMessage) -> None:
         try:
@@ -54,7 +56,8 @@ class DeveloperAgent(BaseAgent):
                 raise ValueError("Task description is missing in the payload.")
 
             if action == "generate_tool":
-                result = await self._generate_tool(task)
+                tool_name_hint = msg.payload.get("tool_name", "")
+                result = await self._generate_tool(task, tool_name_hint=tool_name_hint)
             elif action == "generate_patch":
                 result = await self._generate_patch(task, context)
             else:
@@ -83,20 +86,39 @@ class DeveloperAgent(BaseAgent):
                     recipient=msg.sender,
                 )
 
-    async def _generate_tool(self, task: str) -> str:
-        """Generate a new dynamic tool, test it, and register if safe."""
+    async def _generate_tool(self, task: str, tool_name_hint: str = "") -> str:
+        """
+        Full dynamic tool creation pipeline:
+
+          1. LLM generates Python code (DynamicToolGenerator)
+          2. SecurityAgent tests it via bus (with direct fallback)
+          3. If passed → register in ToolRegistry (auto-persisted)
+          4. MemoryAgent stores metadata via bus
+          5. Version history logged
+
+        Returns a human-readable status string.
+        """
+        import asyncio
         from tools.dynamic_tool_generator import tool_generator
-        from tools.sandbox_tester import sandbox_test_tool
         from tools.base_tool import registry as tool_registry
         from self_healing.version_manager import version_manager
         from memory.version_history_db import version_history_db
 
         try:
-            tool = await tool_generator.generate(task)
-            passed, output = await sandbox_test_tool(tool.code)
+            # Step 1: Generate code via LLM
+            tool = await tool_generator.generate(task, tool_name=tool_name_hint or None)
+            log.info(f"DeveloperAgent: generated tool '{tool.name}'")
+
+            # Step 2: Security test — try SecurityAgent bus first, fall back to direct
+            passed, output, bandit_issues = await self._security_test_tool(
+                tool.code, tool.name
+            )
             tool.test_passed = passed
             tool.test_output = output
 
+            code_hash = hashlib.sha256(tool.code.encode()).hexdigest()[:16]
+
+            # Step 3: Register if safe
             if passed:
                 registration_success = tool_registry.register_dynamic(
                     name=tool.name,
@@ -107,7 +129,18 @@ class DeveloperAgent(BaseAgent):
                     tags=tool.tags,
                     version=tool.version,
                 )
+
                 if registration_success:
+                    # Step 4: Notify MemoryAgent (best-effort, non-blocking)
+                    asyncio.ensure_future(self._notify_memory_agent(
+                        tool=tool,
+                        code_hash=code_hash,
+                        test_passed=True,
+                        test_output=output,
+                        bandit_issues=bandit_issues,
+                    ))
+
+                    # Step 5: Version history
                     version_manager.record(
                         author_agent=self.name,
                         change_type="tool_add",
@@ -122,12 +155,18 @@ class DeveloperAgent(BaseAgent):
                         agent=self.name,
                         test_passed=True,
                         test_output=output,
-                        code_hash=hashlib.sha256(tool.code.encode()).hexdigest()[:16],
+                        code_hash=code_hash,
                     )
+
+                    bandit_note = ""
+                    if bandit_issues:
+                        highs = sum(1 for i in bandit_issues if i.get("severity") == "HIGH")
+                        bandit_note = f"\n⚠️ Bandit: {len(bandit_issues)} issues ({highs} HIGH)"
+
                     return (
                         f"✅ Tool '{tool.name}' generated, tested, and registered.\n"
                         f"Description: {tool.description}\n"
-                        f"Version: {tool.version} | ID: {tool.id}\n"
+                        f"Version: {tool.version} | ID: {tool.id}{bandit_note}\n"
                         f"Test output: {output[:200]}"
                     )
                 else:
@@ -141,6 +180,7 @@ class DeveloperAgent(BaseAgent):
                     agent=self.name,
                     test_passed=False,
                     test_output=output,
+                    code_hash=code_hash,
                 )
                 return (
                     f"❌ Tool '{tool.name}' generated but FAILED sandbox test.\n"
@@ -149,6 +189,83 @@ class DeveloperAgent(BaseAgent):
         except Exception as exc:
             log.exception("Tool generation failed.")
             return f"❌ Tool generation failed: {exc}"
+
+    async def _security_test_tool(
+        self, code: str, tool_name: str
+    ) -> tuple[bool, str, list]:
+        """
+        Test generated tool code.
+
+        Tries SecurityAgent via bus first (gives richer feedback with bandit).
+        Falls back to direct sandbox_test_tool() if SecurityAgent is unavailable.
+
+        Returns (passed, output_text, bandit_issues).
+        """
+        import asyncio
+
+        reply_topic = f"developer.sec_result.{tool_name}"
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+
+        def _on_result(m: BusMessage, _f=fut) -> None:
+            if not _f.done():
+                _f.set_result(m.payload)
+
+        self._bus.subscribe(reply_topic, _on_result)
+
+        try:
+            await self.publish(
+                topic="security.test_tool",
+                payload={"code": code, "tool_name": tool_name, "test_input": {}},
+                reply_to=reply_topic,
+            )
+            sec_result = await asyncio.wait_for(fut, timeout=60)
+            return (
+                sec_result.get("passed", False),
+                sec_result.get("output", ""),
+                sec_result.get("bandit_issues", []),
+            )
+        except asyncio.TimeoutError:
+            # SecurityAgent not available — fall back to direct sandbox test
+            log.warning(
+                f"DeveloperAgent: SecurityAgent timed out; "
+                f"falling back to direct sandbox test for '{tool_name}'"
+            )
+            from tools.sandbox_tester import sandbox_test_tool
+            passed, output = await sandbox_test_tool(code)
+            return passed, output, []
+        except Exception as exc:
+            log.warning(
+                f"DeveloperAgent: bus test failed ({exc}); "
+                f"falling back to direct sandbox test"
+            )
+            from tools.sandbox_tester import sandbox_test_tool
+            passed, output = await sandbox_test_tool(code)
+            return passed, output, []
+
+    async def _notify_memory_agent(
+        self, tool: Any, code_hash: str,
+        test_passed: bool, test_output: str, bandit_issues: list
+    ) -> None:
+        """Publish tool metadata to MemoryAgent for persistent storage."""
+        try:
+            await self.publish(
+                topic="memory.store_tool",
+                payload={
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                    "output_schema": tool.output_schema,
+                    "tags": tool.tags,
+                    "version": tool.version,
+                    "author_agent": self.name,
+                    "test_passed": test_passed,
+                    "test_output": test_output[:500],
+                    "code_hash": code_hash,
+                    "bandit_issues_count": len(bandit_issues),
+                },
+            )
+        except Exception as exc:
+            log.warning(f"DeveloperAgent: could not notify MemoryAgent: {exc}")
 
     async def _generate_patch(self, task: str, context: str) -> str:
         """Generate a code patch and return the unified diff."""

@@ -88,9 +88,19 @@ class Orchestrator:
         return db, vector, conv_store
 
     def _initialize_tool_registry(self):
-        """Initialize the tool registry."""
+        """Initialize the tool registry and reload persisted dynamic tools."""
+        from pathlib import Path
         from tools.base_tool import registry as tool_registry
+        from config import settings as settings_module
         tool_registry.discover()
+
+        # Reload any dynamic tools persisted from previous sessions
+        base = getattr(settings_module, "BASE_DIR", None) or Path(__file__).parent
+        persist_dir = Path(base) / "data" / "dynamic_tools"
+        reloaded = tool_registry.load_persisted_tools(persist_dir)
+        if reloaded:
+            log.info(f"ToolRegistry: reloaded {reloaded} persisted dynamic tool(s).")
+
         return tool_registry
 
     async def _start_agents(self, bus, db, vector, conv_store):

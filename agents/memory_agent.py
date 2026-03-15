@@ -47,10 +47,11 @@ class MemoryAgent(BaseAgent):
         self._conv  = conv_store
 
     async def _register_subscriptions(self) -> None:
-        self._bus.subscribe("memory.store",     self._handle_store)
-        self._bus.subscribe("memory.store_cve", self._handle_store_cve)
-        self._bus.subscribe("memory.query",     self._handle_query)
-        self._bus.subscribe("memory.audit",     self._handle_audit)
+        self._bus.subscribe("memory.store",      self._handle_store)
+        self._bus.subscribe("memory.store_cve",  self._handle_store_cve)
+        self._bus.subscribe("memory.store_tool", self._handle_store_tool)
+        self._bus.subscribe("memory.query",      self._handle_query)
+        self._bus.subscribe("memory.audit",      self._handle_audit)
 
     # ------------------------------------------------------------------
     # Handlers
@@ -162,6 +163,70 @@ class MemoryAgent(BaseAgent):
     async def handle(self, description: str, context: str = "") -> str:
         """Direct callable for swarm use — knowledge retrieval."""
         return await self.llm_query(description)
+
+    async def _handle_store_tool(self, msg: BusMessage) -> None:
+        """
+        Payload: { name, description, input_schema, output_schema, tags,
+                   version, author_agent, test_passed, test_output, code_hash }
+
+        Stores tool metadata in both the vector store (for semantic search)
+        and the structured knowledge DB (for exact lookup).
+        """
+        from datetime import datetime, timezone
+
+        name         = msg.payload.get("name", "unknown")
+        description  = msg.payload.get("description", "")
+        input_schema = msg.payload.get("input_schema", {})
+        output_schema= msg.payload.get("output_schema", {})
+        tags         = msg.payload.get("tags", ["dynamic"])
+        version      = msg.payload.get("version", "1.0.0")
+        author_agent = msg.payload.get("author_agent", msg.sender)
+        test_passed  = msg.payload.get("test_passed", False)
+        test_output  = msg.payload.get("test_output", "")
+        code_hash    = msg.payload.get("code_hash", "")
+
+        log_text = (
+            f"Dynamic tool registered: {name} v{version}\n"
+            f"Description: {description}\n"
+            f"Author: {author_agent} | Test passed: {test_passed}\n"
+            f"Tags: {', '.join(tags)}\n"
+            f"Input: {input_schema}\n"
+            f"Output: {output_schema}"
+        )
+
+        # Vector store — enables semantic search for "do we have a tool that…?"
+        self._vs.add(
+            log_text,
+            category="dynamic_tool",
+            metadata={
+                "name": name,
+                "version": version,
+                "author": author_agent,
+                "test_passed": test_passed,
+                "tags": tags,
+                "code_hash": code_hash,
+                "created_at": datetime.now(tz=timezone.utc).isoformat(),
+            },
+        )
+
+        # Structured DB
+        await self._db.insert_analysis(
+            target=f"tool:{name}",
+            agent=author_agent,
+            result_type="dynamic_tool",
+            summary=f"{name} v{version}: {description[:200]}",
+            detail={
+                "input_schema": input_schema,
+                "output_schema": output_schema,
+                "tags": tags,
+                "test_passed": test_passed,
+                "test_output": test_output[:500],
+                "code_hash": code_hash,
+            },
+        )
+
+        log_ref = getattr(self, "_log", None) or __import__("loguru").logger
+        log_ref.info(f"MemoryAgent: stored tool metadata for '{name}'")
 
     # ------------------------------------------------------------------
     # Helpers

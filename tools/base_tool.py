@@ -199,6 +199,17 @@ class ToolRegistry:
 
             self._dynamic_tools[name] = async_fn
             log.info(f"ToolRegistry: dynamic tool '{name}' registered (v{version})")
+
+            # Auto-persist so tool survives restarts
+            try:
+                from pathlib import Path as _Path
+                from config import settings as _sm
+                _base = getattr(_sm, "BASE_DIR", None) or _Path(__file__).parent.parent
+                persist_dir = _Path(_base) / "data" / "dynamic_tools"
+                self.save_dynamic_tool(name, persist_dir)
+            except Exception:
+                pass  # Persistence is best-effort; don't block registration
+
             return True
         except Exception as exc:
             log.error(
@@ -215,6 +226,122 @@ class ToolRegistry:
 
     def list_dynamic(self) -> List[str]:
         return list(self._dynamic_tools.keys())
+
+    # ------------------------------------------------------------------
+    # Unified call interface (static + dynamic)
+    # ------------------------------------------------------------------
+
+    async def call_tool(self, name: str, **kwargs: Any) -> Dict[str, Any]:
+        """
+        Execute a tool by name — works for both static (BaseTool) and
+        dynamic (run_tool function) tools.
+
+        Returns dict with at minimum: {success, result, error}.
+        """
+        # Static tool takes precedence
+        static = self._tools.get(name)
+        if static is not None:
+            return await static.run(**kwargs)
+
+        dynamic = self._dynamic_tools.get(name)
+        if dynamic is not None:
+            try:
+                result = await dynamic(kwargs)
+                if isinstance(result, dict):
+                    result.setdefault("success", True)
+                    result.setdefault("error", None)
+                    return result
+                return {"success": True, "result": result, "error": None}
+            except Exception as exc:
+                log.error(f"Dynamic tool '{name}' execution error: {exc}", exc_info=True)
+                return {"success": False, "result": None, "error": str(exc)}
+
+        log.warning(f"call_tool: tool '{name}' not found (static or dynamic).")
+        return {"success": False, "result": None, "error": f"Tool '{name}' not found."}
+
+    def tool_exists(self, name: str) -> bool:
+        """Return True if a tool (static or dynamic) is registered under name."""
+        return name in self._tools or name in self._dynamic_tools
+
+    def describe_all_tools(self) -> List[Dict[str, Any]]:
+        """Return descriptions for every registered tool (static + dynamic)."""
+        results = list(self.list_tools())
+        for name, fn in self._dynamic_tools.items():
+            results.append({
+                "name": name,
+                "description": fn.__doc__ or "",
+                "schema": getattr(fn, "_input_schema", {}),
+                "output_schema": getattr(fn, "_output_schema", {}),
+                "tags": getattr(fn, "_tags", ["dynamic"]),
+                "version": getattr(fn, "_version", "1.0.0"),
+                "dynamic": True,
+            })
+        return results
+
+    # ------------------------------------------------------------------
+    # Persistence — save / reload dynamic tools across restarts
+    # ------------------------------------------------------------------
+
+    def save_dynamic_tool(self, name: str, persist_dir: Path) -> bool:
+        """
+        Persist a single dynamic tool's metadata + code to persist_dir/<name>.json.
+        Called automatically by register_dynamic() when persist_dir is set.
+        """
+        fn = self._dynamic_tools.get(name)
+        if fn is None:
+            return False
+        persist_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "name": name,
+            "code": getattr(fn, "_code", ""),
+            "description": fn.__doc__ or "",
+            "input_schema": getattr(fn, "_input_schema", {}),
+            "output_schema": getattr(fn, "_output_schema", {}),
+            "tags": getattr(fn, "_tags", ["dynamic"]),
+            "version": getattr(fn, "_version", "1.0.0"),
+        }
+        try:
+            import json
+            (persist_dir / f"{name}.json").write_text(
+                json.dumps(record, indent=2), encoding="utf-8"
+            )
+            log.debug(f"ToolRegistry: persisted dynamic tool '{name}'")
+            return True
+        except Exception as exc:
+            log.error(f"ToolRegistry: could not persist tool '{name}': {exc}")
+            return False
+
+    def load_persisted_tools(self, persist_dir: Path) -> int:
+        """
+        Reload all dynamic tools from persist_dir/*.json.
+        Returns the number of tools successfully loaded.
+        """
+        import json
+        if not persist_dir.exists():
+            return 0
+        loaded = 0
+        for path in sorted(persist_dir.glob("*.json")):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                name = record.get("name", path.stem)
+                if name in self._dynamic_tools:
+                    log.debug(f"ToolRegistry: skipping already-loaded tool '{name}'")
+                    continue
+                ok = self.register_dynamic(
+                    name=name,
+                    code=record.get("code", ""),
+                    description=record.get("description", ""),
+                    input_schema=record.get("input_schema", {}),
+                    output_schema=record.get("output_schema", {}),
+                    tags=record.get("tags", ["dynamic"]),
+                    version=record.get("version", "1.0.0"),
+                )
+                if ok:
+                    loaded += 1
+                    log.info(f"ToolRegistry: reloaded persisted tool '{name}'")
+            except Exception as exc:
+                log.error(f"ToolRegistry: failed to reload '{path.name}': {exc}")
+        return loaded
 
 
 # Module-level singleton

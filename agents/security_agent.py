@@ -42,6 +42,7 @@ class SecurityAnalysisAgent(BaseAgent):
         self._bus.subscribe("security.scan_repo",  self._handle_scan_repo)
         self._bus.subscribe("security.full_scan",  self._handle_full_scan)
         self._bus.subscribe("security.code_audit", self._handle_code_audit)
+        self._bus.subscribe("security.test_tool",  self._handle_test_tool)
 
     # ------------------------------------------------------------------
     # Handlers
@@ -234,6 +235,99 @@ class SecurityAnalysisAgent(BaseAgent):
                 },
             )
         )
+
+    # ------------------------------------------------------------------
+    # Dynamic tool security testing
+    # ------------------------------------------------------------------
+
+    async def _handle_test_tool(self, msg: BusMessage) -> None:
+        """
+        Payload: { code, tool_name, test_input (optional) }
+        Tests generated tool code in a sandbox subprocess and optionally
+        via bandit static analysis.
+        Replies to msg.reply_to with:
+          { passed, score, output, bandit_issues, tool_name }
+        """
+        code      = msg.payload.get("code", "")
+        tool_name = msg.payload.get("tool_name", "unknown")
+        test_input = msg.payload.get("test_input", {})
+
+        log.info(f"SecurityAgent: testing generated tool '{tool_name}'")
+
+        if not code:
+            result = {"passed": False, "score": 0, "output": "No code provided",
+                      "bandit_issues": [], "tool_name": tool_name}
+        else:
+            passed, output, bandit_issues = await self._test_tool_code(
+                code, test_input
+            )
+            # Score 0-100: sandbox pass = 60pts, each bandit HIGH = -20pts
+            score = 60 if passed else 0
+            score -= sum(20 for i in bandit_issues if i.get("severity") == "HIGH")
+            score -= sum(10 for i in bandit_issues if i.get("severity") == "MEDIUM")
+            score = max(0, min(100, score))
+
+            result = {
+                "passed": passed and score >= 40,
+                "score": score,
+                "output": output,
+                "bandit_issues": bandit_issues,
+                "tool_name": tool_name,
+            }
+
+        if msg.reply_to:
+            await self._bus.publish(BusMessage(
+                topic=msg.reply_to,
+                sender=self.name,
+                recipient=msg.sender,
+                payload=result,
+            ))
+
+    async def _test_tool_code(
+        self,
+        code: str,
+        test_input: Dict[str, Any],
+    ) -> tuple[bool, str, List[Dict]]:
+        """
+        Run sandbox execution + bandit static analysis on generated tool code.
+        Returns (passed, output_text, bandit_issues).
+        """
+        from tools.sandbox_tester import sandbox_test_tool
+
+        # 1. Sandbox execution
+        passed, output = await sandbox_test_tool(code, test_input, timeout=30)
+
+        # 2. Bandit static analysis (best-effort, non-blocking)
+        bandit_issues: List[Dict] = []
+        try:
+            import tempfile, json as _json
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".py", delete=False, encoding="utf-8"
+            ) as tf:
+                tf.write(code)
+                tf_path = tf.name
+
+            proc = await asyncio.create_subprocess_exec(
+                "bandit", "-f", "json", "-q", tf_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+            Path(tf_path).unlink(missing_ok=True)
+            data = _json.loads(stdout.decode(errors="replace") or "{}")
+            for r in data.get("results", []):
+                bandit_issues.append({
+                    "severity": r.get("issue_severity", ""),
+                    "confidence": r.get("issue_confidence", ""),
+                    "text": r.get("issue_text", ""),
+                    "line": r.get("line_number", 0),
+                })
+        except (FileNotFoundError, asyncio.TimeoutError):
+            pass  # bandit not installed or timed out — skip
+        except Exception as exc:
+            log.warning(f"SecurityAgent: bandit check failed: {exc}")
+
+        return passed, output, bandit_issues
 
 
 # ---------------------------------------------------------------------------
