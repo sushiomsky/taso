@@ -22,11 +22,11 @@ from urllib.parse import urlparse
 import aiosqlite
 
 from config.logging_config import get_logger
-from config import settings
+from config.settings import settings
 
 log = get_logger("crawler_db")
 
-DB_PATH = str(settings.DB_PATH / "crawler.db")
+DB_PATH = str(settings.DB_PATH.parent / "crawler.db")
 
 # URL status values
 STATUS_PENDING   = "pending"

@@ -24,7 +24,7 @@ from config.settings import settings
 
 log = get_logger("user_profile_store")
 
-DB_PATH = str(settings.DB_PATH / "user_profiles.db")
+DB_PATH = str(settings.DB_PATH.parent / "user_profiles.db")
 
 # How many messages to keep in the events table per user before trimming
 MAX_EVENTS_PER_USER = 500
