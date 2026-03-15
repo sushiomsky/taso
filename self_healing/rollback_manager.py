@@ -22,6 +22,7 @@ class RollbackManager:
         self._error_threshold = 3
         self._rollback_log: List[dict] = []
         self._last_rollback_time = 0.0
+        self._debounce_interval = 300  # seconds
 
     async def record_error(self, context: str) -> Optional[str]:
         """
@@ -32,11 +33,10 @@ class RollbackManager:
         log.warning(f"RollbackManager: error #{self._error_count} — {context}")
 
         if self._error_count >= self._error_threshold:
-            # Debounce: don't rollback more than once per 5 minutes
-            if time.time() - self._last_rollback_time < 300:
-                log.info("RollbackManager: debounce — skipping rollback.")
+            if self._is_debounce_active():
+                log.info("RollbackManager: debounce active — skipping rollback.")
                 return None
-            return await self.rollback(reason=f"Auto-rollback: {context}")
+            return await self._trigger_rollback(reason=f"Auto-rollback: {context}")
         return None
 
     def reset_errors(self) -> None:
@@ -49,15 +49,50 @@ class RollbackManager:
         Returns the SHA rolled back to, or None on failure.
         """
         if target_sha is None:
-            last_stable = version_manager.last_stable()
-            if not last_stable or not last_stable.commit_sha:
+            target_sha = self._get_last_stable_sha()
+            if not target_sha:
                 log.error("RollbackManager: no stable version to roll back to.")
                 return None
-            target_sha = last_stable.commit_sha
 
+        return await self._trigger_rollback(reason=reason, target_sha=target_sha)
+
+    def rollback_history(self) -> List[dict]:
+        return self._rollback_log[-10:]
+
+    def _is_debounce_active(self) -> bool:
+        """
+        Check if rollback debounce is active based on the last rollback time.
+        """
+        return time.time() - self._last_rollback_time < self._debounce_interval
+
+    def _get_last_stable_sha(self) -> Optional[str]:
+        """
+        Retrieve the last stable commit SHA from the version manager.
+        """
+        last_stable = version_manager.last_stable()
+        if not last_stable or not last_stable.commit_sha:
+            log.error("RollbackManager: no stable version available.")
+            return None
+        return last_stable.commit_sha
+
+    async def _trigger_rollback(self, reason: str, target_sha: str) -> Optional[str]:
+        """
+        Perform the rollback operation and log the result.
+        """
         log.warning(f"RollbackManager: rolling back to {target_sha} — reason: {reason}")
-        success = await git_revert_to(target_sha)
+        try:
+            success = await git_revert_to(target_sha)
+        except Exception as e:
+            log.error(f"RollbackManager: rollback to {target_sha} FAILED due to exception: {e}")
+            success = False
 
+        self._record_rollback(target_sha, reason, success)
+        return target_sha if success else None
+
+    def _record_rollback(self, target_sha: str, reason: str, success: bool) -> None:
+        """
+        Record the details of a rollback attempt.
+        """
         entry = {
             "time": time.time(),
             "reason": reason,
@@ -72,10 +107,6 @@ class RollbackManager:
             log.info(f"RollbackManager: rollback to {target_sha} succeeded.")
         else:
             log.error(f"RollbackManager: rollback to {target_sha} FAILED.")
-        return target_sha if success else None
-
-    def rollback_history(self) -> List[dict]:
-        return self._rollback_log[-10:]
 
 
 rollback_manager = RollbackManager()
