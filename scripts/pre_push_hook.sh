@@ -26,7 +26,7 @@ try:
     from config.settings import settings
     from agents.coordinator_agent import CoordinatorAgent
     from agents.message_bus import MessageBus
-    from tools.base_tool import tool_registry
+    from tools.base_tool import registry
     from memory.knowledge_db import KnowledgeDB
     from bot.telegram_bot import TelegramBot
     print('  ✓ All critical imports OK')
