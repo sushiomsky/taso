@@ -49,7 +49,7 @@ class CoordinatorAgent(BaseAgent):
     def __init__(self, bus: MessageBus) -> None:
         super().__init__(bus)
         # task_id -> task record
-        self._tasks: Dict[str, Dict[str, Any]] = {}
+        self._work_tasks: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Subscriptions
@@ -88,7 +88,7 @@ class CoordinatorAgent(BaseAgent):
                 "reply_to_chat": msg.payload.get("reply_to_chat"),
                 "reply_topic": msg.reply_to,
             }
-            self._tasks[task_id] = record
+            self._work_tasks[task_id] = record
 
             log.info(f"Coordinator received task: {command} (id={task_id})")
 
@@ -110,12 +110,12 @@ class CoordinatorAgent(BaseAgent):
         try:
             task_id = msg.payload.get("task_id")
             if task_id:
-                record = self._tasks.get(task_id)
+                record = self._work_tasks.get(task_id)
                 payload = record if record else {"error": "Task not found"}
             else:
                 # Return summary of recent tasks
                 recent = sorted(
-                    self._tasks.values(),
+                    self._work_tasks.values(),
                     key=lambda t: t["created_at"],
                     reverse=True,
                 )[:10]
@@ -146,11 +146,11 @@ class CoordinatorAgent(BaseAgent):
         """Collect sub-task results back from agents."""
         try:
             task_id = msg.payload.get("task_id")
-            if not task_id or task_id not in self._tasks:
+            if not task_id or task_id not in self._work_tasks:
                 log.warning(f"Received result for unknown task_id: {task_id}")
                 return
 
-            record = self._tasks[task_id]
+            record = self._work_tasks[task_id]
             record["results"].append({
                 "from": msg.sender,
                 "payload": msg.payload,
@@ -166,12 +166,12 @@ class CoordinatorAgent(BaseAgent):
                           args: Dict, original_msg: BusMessage) -> None:
         try:
             result = await self._dispatch(task_id, command, args)
-            self._tasks[task_id]["status"] = DONE
-            self._tasks[task_id]["result"] = result
+            self._work_tasks[task_id]["status"] = DONE
+            self._work_tasks[task_id]["result"] = result
         except Exception as exc:
             log.error(f"Task {task_id} failed: {exc}")
-            self._tasks[task_id]["status"] = FAILED
-            self._tasks[task_id]["error"] = str(exc)
+            self._work_tasks[task_id]["status"] = FAILED
+            self._work_tasks[task_id]["error"] = str(exc)
             result = {"error": str(exc)}
 
         # Notify caller if reply_to is set
@@ -249,17 +249,17 @@ class CoordinatorAgent(BaseAgent):
 
     def status(self) -> Dict[str, Any]:
         base = super().status()
-        base["total_tasks"] = len(self._tasks)
-        base["running_tasks"] = sum(1 for t in self._tasks.values() if t["status"] == RUNNING)
-        base["done_tasks"] = sum(1 for t in self._tasks.values() if t["status"] == DONE)
+        base["total_tasks"] = len(self._work_tasks)
+        base["running_tasks"] = sum(1 for t in self._work_tasks.values() if t["status"] == RUNNING)
+        base["done_tasks"] = sum(1 for t in self._work_tasks.values() if t["status"] == DONE)
         return base
 
     def get_task(self, task_id: str) -> Optional[Dict]:
-        return self._tasks.get(task_id)
+        return self._work_tasks.get(task_id)
 
     def list_tasks(self, limit: int = 10) -> List[Dict]:
         return sorted(
-            self._tasks.values(),
+            self._work_tasks.values(),
             key=lambda t: t["created_at"],
             reverse=True,
         )[:limit]
