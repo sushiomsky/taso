@@ -26,7 +26,7 @@ from telegram import (
     InlineKeyboardMarkup,
     BotCommand,
 )
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -758,75 +758,188 @@ class TelegramBot:
         "chat":          "_nlp_chat",
     }
 
+    # Maps every intent to a human-readable label shown while the action runs.
+    # All 30 intents are covered so the user always knows what was understood.
+    _INTENT_LABELS: Dict[str, str] = {
+        "status":        "📊 Checking status",
+        "agents":        "🤖 Listing agents",
+        "tools":         "🔧 Listing tools",
+        "system":        "🖥️ Reading system info",
+        "logs":          "📋 Fetching logs",
+        "memory":        "🧠 Querying memory",
+        "scan_repo":     "🔍 Scanning repository",
+        "security_scan": "🛡️ Running security scan",
+        "code_audit":    "🔎 Auditing code",
+        "threat_intel":  "🌐 Gathering threat intelligence",
+        "update_self":   "🔄 Triggering self-update",
+        "swarm_status":  "🐝 Checking swarm status",
+        "swarm_agents":  "🐝 Listing swarm agents",
+        "swarm_models":  "🤖 Listing LLM models",
+        "swarm_task":    "🐝 Dispatching to agent swarm",
+        "dev_status":    "📦 Checking dev status",
+        "dev_task":      "⚙️ Submitting dev task",
+        "dev_tool":      "🛠️ Generating new tool",
+        "dev_patch":     "📝 Generating patch",
+        "dev_rollback":  "⏪ Rolling back",
+        "dev_deploy":    "🚀 Deploying",
+        "dev_suggestion":"💡 Generating suggestions",
+        "models":        "🤖 Listing models",
+        "learn_repo":    "📚 Learning from repository",
+        "add_feature":   "✨ Building new feature",
+        "create_agent":  "🤖 Creating new agent",
+        "create_tool":   "🛠️ Creating new tool",
+        "chat":          "",
+    }
+
+    # Fast-path: obvious keyword patterns that skip the LLM entirely.
+    # Checked before calling _classify_intent to reduce latency for simple inputs.
+    _FAST_PATTERNS: List[tuple] = [
+        # (regex, intent, arg_group_or_empty)
+        (r"^(status|how are you|are you (up|alive|running)\??)$", "status", ""),
+        (r"^(agents?|list agents?|show agents?)$", "agents", ""),
+        (r"^(tools?|list tools?|show tools?|what tools?)$", "tools", ""),
+        (r"^(logs?|show logs?|recent logs?)$", "logs", ""),
+        (r"^(system|sysinfo|system (info|status|resources?))$", "system", ""),
+        (r"^(memory|show memory|what do you know)$", "memory", ""),
+        (r"^(models?|list models?|llm models?)$", "models", ""),
+        (r"^(swarm status|swarm)$", "swarm_status", ""),
+        (r"^(swarm agents?)$", "swarm_agents", ""),
+        (r"^(dev status|development status)$", "dev_status", ""),
+        (r"^(help|\?)$", "chat", ""),
+    ]
+
     _INTENT_SYSTEM = (
-        "You are an intent classifier for TASO, a security AI bot. "
-        "Given a user message, respond with JSON only — no explanation.\n\n"
-        "Available intents:\n"
-        "- status: check bot/system status\n"
-        "- agents: list running agents\n"
-        "- tools: list available tools\n"
-        "- system: system resource info\n"
-        "- logs: view recent logs\n"
-        "- memory: query stored knowledge/memory\n"
-        "- scan_repo: scan/analyze a code repository (arg: repo path or URL)\n"
-        "- security_scan: run security vulnerability scan (arg: target path/URL)\n"
-        "- code_audit: audit a code snippet for vulnerabilities\n"
-        "- threat_intel: gather threat intelligence on a topic (arg: topic/CVE/domain)\n"
-        "- update_self: trigger self-improvement/update cycle\n"
-        "- swarm_status: swarm orchestrator status\n"
-        "- swarm_agents: list swarm agents\n"
-        "- swarm_models: list available LLM models\n"
-        "- swarm_task: run a complex task via agent swarm (arg: task description)\n"
-        "- dev_status: development/version/health overview\n"
-        "- dev_task: submit a development or feature task (arg: task description)\n"
-        "- dev_tool: create a new tool via LLM (arg: tool description)\n"
-        "- dev_patch: patch/modify a module (arg: what to change)\n"
-        "- dev_rollback: rollback to previous version\n"
-        "- dev_deploy: deploy latest code from GitHub\n"
-        "- dev_suggestion: ask bot to suggest improvements\n"
-        "- models: show registered LLM models and their status\n"
-        "- learn_repo: learn from a GitHub repository URL (arg: github URL)\n"
-        "- add_feature: create a new feature or tool (arg: feature description)\n"
-        "- create_agent: autonomously generate a new agent (arg: agent description)\n"
-        "- create_tool: autonomously generate and register a new tool (arg: tool description)\n"
-        "- chat: general conversation, questions, anything else\n\n"
-        "Respond with ONLY valid JSON:\n"
-        '{"intent": "<intent>", "arg": "<extracted argument or empty string>", '
-        '"confidence": <0.0-1.0>}'
+        "You are an intent classifier for TASO, an autonomous AI security bot.\n"
+        "Analyse the user message and recent conversation, then respond with ONLY valid JSON.\n\n"
+        "INTENT LIST (pick exactly one):\n"
+        "status | agents | tools | system | logs | memory\n"
+        "scan_repo(arg=path/url) | security_scan(arg=target) | code_audit | threat_intel(arg=topic/CVE)\n"
+        "update_self | swarm_status | swarm_agents | swarm_models | swarm_task(arg=task)\n"
+        "dev_status | dev_task(arg=task) | dev_tool(arg=description) | dev_patch(arg=change)\n"
+        "dev_rollback | dev_deploy | dev_suggestion | models\n"
+        "learn_repo(arg=github_url) | add_feature(arg=description)\n"
+        "create_agent(arg=description) | create_tool(arg=description)\n"
+        "chat  ← use for greetings, questions, anything not matching above\n\n"
+        "DISAMBIGUATION RULES:\n"
+        "- 'scan' alone without a path/url → security_scan, not scan_repo\n"
+        "- 'audit' + code snippet or file path → code_audit\n"
+        "- 'create' + agent/tool keyword → create_agent or create_tool\n"
+        "- Questions about TASO capabilities → chat\n"
+        "- Confidence < 0.6 when genuinely ambiguous\n\n"
+        "EXAMPLES:\n"
+        'msg: "scan this repo github.com/x/y" → {"intent":"scan_repo","arg":"github.com/x/y","confidence":0.95}\n'
+        'msg: "what cves are trending" → {"intent":"threat_intel","arg":"trending CVEs","confidence":0.90}\n'
+        'msg: "make a tool that pings hosts" → {"intent":"create_tool","arg":"ping hosts","confidence":0.92}\n'
+        'msg: "hello" → {"intent":"chat","arg":"","confidence":0.99}\n\n'
+        "OUTPUT: ONLY this JSON, nothing else:\n"
+        '{"intent":"<intent>","arg":"<argument or empty>","confidence":<0.0-1.0>}'
     )
 
+    # Minimum confidence to act directly; below this we ask for clarification.
+    _CONFIDENCE_THRESHOLD = 0.60
+    # Minimum confidence to show the intent label without asking first.
+    _LABEL_THRESHOLD = 0.75
+
+    @staticmethod
+    def _extract_json(raw: str) -> Optional[Dict]:
+        """Robustly extract the first JSON object from an LLM response."""
+        import re as _re
+        # Try full parse first
+        try:
+            return json.loads(raw.strip())
+        except json.JSONDecodeError:
+            pass
+        # Find the outermost {...} block
+        depth, start = 0, None
+        for i, ch in enumerate(raw):
+            if ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}" and depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    try:
+                        return json.loads(raw[start:i + 1])
+                    except json.JSONDecodeError:
+                        start = None
+        return None
+
+    async def _fast_path(self, text: str) -> Optional[Dict]:
+        """Check obvious keyword patterns without calling the LLM."""
+        import re as _re
+        lower = text.lower().strip()
+        for pattern, intent, arg in self._FAST_PATTERNS:
+            m = _re.match(pattern, lower)
+            if m:
+                return {"intent": intent, "arg": arg or text, "confidence": 0.99,
+                        "fast_path": True}
+        return None
+
     async def _classify_intent(self, text: str, history: List[Dict]) -> Dict:
-        """Use LLM to classify the user's natural-language intent."""
+        """Classify the user's natural-language intent via fast-path then LLM."""
+        # 1. Fast-path for obvious inputs (zero LLM cost, instant response)
+        fast = await self._fast_path(text)
+        if fast:
+            return fast
+
+        # 2. LLM classification with conversation context
         try:
             from models.model_router import router
             from models.model_registry import TaskType
-            # Build compact history context (last 3 turns)
-            ctx_lines = []
-            for h in history[-6:]:
-                role = h.get("role", "")
-                content = h.get("content", "")[:120]
-                ctx_lines.append(f"{role}: {content}")
-            ctx_str = "\n".join(ctx_lines)
 
+            # Last 4 turns (8 messages) — enough context without token bloat
+            ctx_lines = [
+                f"{h.get('role','')}: {h.get('content','')[:150]}"
+                for h in history[-8:]
+            ]
+            ctx_str = "\n".join(ctx_lines)
             prompt = (
-                f"Conversation context:\n{ctx_str}\n\n"
-                f"User message: {text}"
-            ) if ctx_str else f"User message: {text}"
+                f"Recent conversation:\n{ctx_str}\n\nUser: {text}"
+                if ctx_str else f"User: {text}"
+            )
 
             raw = await router.query(
                 prompt=prompt,
                 task_type=TaskType.ANALYSIS,
                 system=self._INTENT_SYSTEM,
             )
-            # Extract JSON from response
-            import re as _re
-            m = _re.search(r'\{[^{}]+\}', raw, _re.DOTALL)
-            if m:
-                return json.loads(m.group())
+            result = self._extract_json(raw)
+            if result and "intent" in result:
+                # Clamp confidence to valid range
+                result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.5))))
+                return result
         except Exception as exc:
             log.warning(f"Intent classification failed: {exc}")
-        # Fallback: treat as chat
+
         return {"intent": "chat", "arg": text, "confidence": 0.5}
+
+    async def _send_typing(self, update: Update) -> None:
+        """Send a typing indicator — fire-and-forget, never raises."""
+        try:
+            await update.message.chat.send_action(ChatAction.TYPING)
+        except Exception:
+            pass
+
+    async def _ask_clarification(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+        intent: str, arg: str, confidence: float,
+    ) -> None:
+        """Ask the user to confirm a low-confidence intent via inline keyboard."""
+        label = self._INTENT_LABELS.get(intent, intent.replace("_", " ").title())
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(f"✅ Yes — {label}", callback_data=f"confirm:{intent}:{arg[:80]}"),
+                InlineKeyboardButton("❌ No, just chat", callback_data="confirm:chat:"),
+            ]
+        ])
+        await update.message.reply_text(
+            f"🤔 I think you want: *{label}*\n"
+            f"_(confidence: {confidence:.0%})_\n\n"
+            f"Should I proceed?",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard,
+        )
 
     async def _handle_message(
         self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
@@ -836,20 +949,20 @@ class TelegramBot:
 
         chat_id = update.effective_chat.id
         text    = (update.message.text or "").strip()
-
         if not text:
             return
 
-        # --- Awaiting state takes priority ---
+        # --- Awaiting states take priority ---
         if ctx.user_data.get("awaiting_code_audit"):
             ctx.user_data.pop("awaiting_code_audit")
-            await update.message.reply_text("🔍 Auditing submitted code…")
+            await self._send_typing(update)
+            await update.message.reply_text("🔎 Auditing submitted code…")
             result = await self._dispatch_task(
                 "code_audit", {"code": text, "filename": "user_submitted.py"}, update
             )
             analysis = result.get("result", {}).get("analysis", "No analysis.")
             await self._reply_long(
-                update, f"🛡️ **Code Audit Result**\n\n{analysis}",
+                update, f"🛡️ *Code Audit Result*\n\n{analysis}",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -858,32 +971,39 @@ class TelegramBot:
         await self._conv.add_message(chat_id, "user", text)
         history = await self._conv.get_context(chat_id)
 
+        # Show typing while classifying (user gets immediate feedback)
+        await self._send_typing(update)
+
         # --- Classify intent ---
         classification = await self._classify_intent(text, history)
         intent     = classification.get("intent", "chat")
         arg        = classification.get("arg", text)
-        confidence = classification.get("confidence", 1.0)
+        confidence = float(classification.get("confidence", 0.5))
+        fast       = classification.get("fast_path", False)
 
-        log.info(f"NLP intent: {intent!r} confidence={confidence:.2f} arg={str(arg)[:60]!r}")
+        log.info(
+            f"NLP intent={intent!r} confidence={confidence:.2f} "
+            f"fast={fast} arg={str(arg)[:60]!r}"
+        )
 
-        # Show intent hint for transparency (only when not plain chat)
-        if intent != "chat" and confidence >= 0.75:
-            intent_labels = {
-                "scan_repo": "🔍 Scanning repository",
-                "security_scan": "🛡️ Running security scan",
-                "code_audit": "🔎 Preparing code audit",
-                "threat_intel": "🌐 Gathering threat intelligence",
-                "update_self": "🔄 Triggering self-update",
-                "swarm_task": "🐝 Dispatching to agent swarm",
-                "dev_task": "⚙️ Submitting dev task",
-                "dev_tool": "🛠️ Creating new tool",
-                "dev_patch": "📝 Generating patch",
-                "dev_rollback": "⏪ Rolling back",
-                "dev_deploy": "🚀 Deploying",
-            }
-            label = intent_labels.get(intent)
-            if label:
+        # --- Low confidence → ask for clarification ---
+        if intent != "chat" and confidence < self._CONFIDENCE_THRESHOLD:
+            await self._ask_clarification(update, ctx, intent, arg, confidence)
+            return
+
+        # --- Show what the bot understood (for non-trivial actions) ---
+        label = self._INTENT_LABELS.get(intent, "")
+        if label and confidence >= self._LABEL_THRESHOLD and not fast:
+            if arg and arg != text:
+                await update.message.reply_text(
+                    f"{label}…\n_Arg: {arg[:120]}_",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            else:
                 await update.message.reply_text(f"{label}…")
+
+        # Keep typing indicator alive for slow operations
+        await self._send_typing(update)
 
         # --- Dispatch to intent handler ---
         handler_name = self._INTENT_MAP.get(intent, "_nlp_chat")
@@ -891,7 +1011,7 @@ class TelegramBot:
         response = await handler(update, ctx, arg, history)
 
         if response:
-            await self._conv.add_message(chat_id, "assistant", response[:500])
+            await self._conv.add_message(chat_id, "assistant", response[:800])
             await self._reply_long(update, response)
 
     # ------------------------------------------------------------------
@@ -1033,12 +1153,14 @@ class TelegramBot:
         return None
 
     async def _nlp_chat(self, update, ctx, arg, history) -> Optional[str]:
-        """General conversation — answer directly via LLM."""
+        """General conversation — answer directly via LLM with full context."""
         system = (
             "You are TASO, an autonomous AI security research assistant. "
             "You help with cybersecurity analysis, threat intelligence, code review, "
-            "and security automation. Be concise, technical, and direct. "
-            "You can also explain your own capabilities when asked."
+            "and security automation. Be concise, technical, and direct.\n\n"
+            "When the user seems to want to run a command, remind them they can just "
+            "describe what they want in plain English — you will route automatically.\n"
+            "Format responses with markdown where it aids readability."
         )
         response = await self._coordinator.llm_query(
             arg or update.message.text or "",
@@ -1056,8 +1178,46 @@ class TelegramBot:
     ) -> None:
         query = update.callback_query
         await query.answer()
-        data  = query.data or ""
+        data = query.data or ""
 
+        # Clarification confirmation from _ask_clarification()
+        if data.startswith("confirm:"):
+            parts = data.split(":", 2)
+            intent = parts[1] if len(parts) > 1 else "chat"
+            arg    = parts[2] if len(parts) > 2 else ""
+
+            if intent == "chat":
+                await query.edit_message_text("💬 Got it — treating as a chat message.")
+                await self._send_typing(update)
+                history = await self._conv.get_context(query.message.chat_id)
+                response = await self._nlp_chat(update, ctx, arg or query.message.text or "", history)
+                if response:
+                    await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+                return
+
+            label = self._INTENT_LABELS.get(intent, intent.replace("_", " ").title())
+            await query.edit_message_text(f"{label}…")
+            await self._send_typing(update)
+
+            handler_name = self._INTENT_MAP.get(intent, "_nlp_chat")
+            handler = getattr(self, handler_name, self._nlp_chat)
+            history = await self._conv.get_context(query.message.chat_id)
+
+            # Build a minimal fake update so handlers can reply normally
+            response = await handler(update, ctx, arg, history)
+            if response:
+                await self._conv.add_message(query.message.chat_id, "assistant", response[:800])
+                if len(response) <= 4000:
+                    await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+                else:
+                    for i in range(0, len(response), 4000):
+                        await query.message.reply_text(
+                            response[i:i + 4000], parse_mode=ParseMode.MARKDOWN
+                        )
+                        await asyncio.sleep(0.2)
+            return
+
+        # Legacy scan callback
         if data.startswith("scan:"):
             repo = data[5:]
             await query.message.reply_text(f"🔍 Scanning `{repo}`…",
