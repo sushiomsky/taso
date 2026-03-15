@@ -1,54 +1,108 @@
+"""
+TASO – Telegram Control Bot
+
+Production-grade async Telegram bot using python-telegram-bot v20+.
+
+Features:
+  • Admin-only authentication on sensitive commands
+  • Full command set mapped to the agent orchestrator
+  • Inline keyboards for interactive responses
+  • Message length splitting (Telegram 4096 char limit)
+  • Rate limiting per chat
+  • Conversation context stored per chat
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    BotCommand,
+)
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+from agents.message_bus import BusMessage, MessageBus
+from agents.coordinator_agent import CoordinatorAgent
+from memory.conversation_store import ConversationStore
+from config.settings import settings
+from config.logging_config import get_logger
+
+log = get_logger("agent")
+
+# ---------------------------------------------------------------------------
+# Rate limiter
+# ---------------------------------------------------------------------------
+
 class RateLimiter:
     """Simple token-bucket rate limiter per chat_id."""
 
     def __init__(self, rate: int = 10, per: float = 60.0) -> None:
-        self._rate = rate
-        self._per = per
+        self._rate    = rate
+        self._per     = per
         self._buckets: Dict[int, List[float]] = {}
 
     def is_allowed(self, chat_id: int) -> bool:
         now = time.time()
         bucket = self._buckets.setdefault(chat_id, [])
         # Remove timestamps older than the window
-        bucket = [t for t in bucket if now - t < self._per]
-        if len(bucket) >= self._rate:
+        self._buckets[chat_id] = [t for t in bucket if now - t < self._per]
+        if len(self._buckets[chat_id]) >= self._rate:
             return False
-        bucket.append(now)
-        self._buckets[chat_id] = bucket
+        self._buckets[chat_id].append(now)
         return True
 
+
+# ---------------------------------------------------------------------------
+# Bot
+# ---------------------------------------------------------------------------
 
 class TelegramBot:
     """TASO Telegram control interface."""
 
     _COMMANDS = [
-        BotCommand("start", "Welcome and authenticate"),
-        BotCommand("status", "System and agent status"),
-        BotCommand("agents", "List all agents"),
-        BotCommand("memory", "Query the knowledge base"),
-        BotCommand("scan_repo", "Scan a Git repository"),
-        BotCommand("security_scan", "Run full security scan"),
-        BotCommand("code_audit", "Audit a code snippet"),
-        BotCommand("threat_intel", "Collect threat intelligence"),
-        BotCommand("update_self", "Propose self-improvement patches"),
-        BotCommand("tools", "List available tools"),
-        BotCommand("logs", "View recent logs"),
-        BotCommand("system", "Host system metrics"),
-        BotCommand("swarm_status", "Show swarm execution status"),
-        BotCommand("swarm_agents", "List all registered agents and load"),
-        BotCommand("swarm_models", "Show model registry and routing"),
+        BotCommand("start",          "Welcome and authenticate"),
+        BotCommand("status",         "System and agent status"),
+        BotCommand("agents",         "List all agents"),
+        BotCommand("memory",         "Query the knowledge base"),
+        BotCommand("scan_repo",      "Scan a Git repository"),
+        BotCommand("security_scan",  "Run full security scan"),
+        BotCommand("code_audit",     "Audit a code snippet"),
+        BotCommand("threat_intel",   "Collect threat intelligence"),
+        BotCommand("update_self",    "Propose self-improvement patches"),
+        BotCommand("tools",          "List available tools"),
+        BotCommand("logs",           "View recent logs"),
+        BotCommand("system",         "Host system metrics"),
+        BotCommand("swarm_status",   "Show swarm execution status"),
+        BotCommand("swarm_agents",   "List all registered agents and load"),
+        BotCommand("swarm_models",   "Show model registry and routing"),
         BotCommand("run_swarm_task", "Execute a task via the agent swarm"),
-        BotCommand("model_router", "Show model routing configuration"),
-        BotCommand("system_status", "Full system status overview"),
-        BotCommand("help", "Show all commands"),
-        BotCommand("dev_status", "Development system overview"),
-        BotCommand("dev_task", "Submit a development task to the swarm"),
-        BotCommand("dev_tool", "Request dynamic tool creation"),
-        BotCommand("dev_patch", "Request code patch generation"),
-        BotCommand("dev_review", "Review latest code change"),
-        BotCommand("dev_rollback", "Rollback to previous stable version"),
-        BotCommand("dev_deploy", "Deploy latest from GitHub"),
-        BotCommand("dev_memory", "Query version history and logs"),
+        BotCommand("model_router",   "Show model routing configuration"),
+        BotCommand("system_status",  "Full system status overview"),
+        BotCommand("help",           "Show all commands"),
+        BotCommand("dev_status",     "Development system overview"),
+        BotCommand("dev_task",       "Submit a development task to the swarm"),
+        BotCommand("dev_tool",       "Request dynamic tool creation"),
+        BotCommand("dev_patch",      "Request code patch generation"),
+        BotCommand("dev_review",     "Review latest code change"),
+        BotCommand("dev_rollback",   "Rollback to previous stable version"),
+        BotCommand("dev_deploy",     "Deploy latest from GitHub"),
+        BotCommand("dev_memory",     "Query version history and logs"),
         BotCommand("dev_suggestion", "Get bot self-improvement suggestions"),
     ]
 
@@ -59,12 +113,16 @@ class TelegramBot:
         conv_store: ConversationStore,
         tool_registry: Any,
     ) -> None:
-        self._bus = bus
+        self._bus         = bus
         self._coordinator = coordinator
-        self._conv = conv_store
-        self._tools = tool_registry
-        self._limiter = RateLimiter(rate=20, per=60)
+        self._conv        = conv_store
+        self._tools       = tool_registry
+        self._limiter     = RateLimiter(rate=20, per=60)
         self._app: Optional[Application] = None
+
+    # ------------------------------------------------------------------
+    # Startup / shutdown
+    # ------------------------------------------------------------------
 
     async def start(self) -> None:
         if not settings.TELEGRAM_BOT_TOKEN:
@@ -78,17 +136,19 @@ class TelegramBot:
                 .build()
             )
 
+            # Register handlers
             self._register_handlers()
 
+            # Set bot command menu
             await self._app.bot.set_my_commands(self._COMMANDS)
 
-            log.info("Telegram bot initializing...")
+            log.info("Telegram bot initialising...")
             await self._app.initialize()
             await self._app.start()
             await self._app.updater.start_polling(drop_pending_updates=True)
             log.info("Telegram bot is online.")
         except Exception as e:
-            log.exception("Failed to start Telegram bot", exc_info=e)
+            log.error(f"Failed to start Telegram bot: {e}")
 
     async def stop(self) -> None:
         if self._app:
@@ -98,7 +158,11 @@ class TelegramBot:
                 await self._app.shutdown()
                 log.info("Telegram bot stopped.")
             except Exception as e:
-                log.exception("Error during Telegram bot shutdown", exc_info=e)
+                log.error(f"Error during Telegram bot shutdown: {e}")
+
+    # ------------------------------------------------------------------
+    # Handler registration
+    # ------------------------------------------------------------------
 
     def _register_handlers(self) -> None:
         if not self._app:
@@ -106,51 +170,59 @@ class TelegramBot:
             return
 
         app = self._app
-        command_handlers = [
-            ("start", self._cmd_start),
-            ("help", self._cmd_help),
-            ("status", self._cmd_status),
-            ("agents", self._cmd_agents),
-            ("memory", self._cmd_memory),
-            ("scan_repo", self._cmd_scan_repo),
-            ("security_scan", self._cmd_security_scan),
-            ("code_audit", self._cmd_code_audit),
-            ("threat_intel", self._cmd_threat_intel),
-            ("update_self", self._cmd_update_self),
-            ("tools", self._cmd_tools),
-            ("logs", self._cmd_logs),
-            ("system", self._cmd_system),
-            ("swarm_status", self._cmd_swarm_status),
-            ("swarm_agents", self._cmd_swarm_agents),
-            ("swarm_models", self._cmd_swarm_models),
-            ("run_swarm_task", self._cmd_run_swarm_task),
-            ("model_router", self._cmd_model_router),
-            ("system_status", self._cmd_system_status),
-            ("dev_status", self._cmd_dev_status),
-            ("dev_task", self._cmd_dev_task),
-            ("dev_tool", self._cmd_dev_tool),
-            ("dev_patch", self._cmd_dev_patch),
-            ("dev_review", self._cmd_dev_review),
-            ("dev_rollback", self._cmd_dev_rollback),
-            ("dev_deploy", self._cmd_dev_deploy),
-            ("dev_memory", self._cmd_dev_memory),
-            ("dev_suggestion", self._cmd_dev_suggestion),
-        ]
+        app.add_handler(CommandHandler("start",         self._cmd_start))
+        app.add_handler(CommandHandler("help",          self._cmd_help))
+        app.add_handler(CommandHandler("status",        self._cmd_status))
+        app.add_handler(CommandHandler("agents",        self._cmd_agents))
+        app.add_handler(CommandHandler("memory",        self._cmd_memory))
+        app.add_handler(CommandHandler("scan_repo",     self._cmd_scan_repo))
+        app.add_handler(CommandHandler("security_scan", self._cmd_security_scan))
+        app.add_handler(CommandHandler("code_audit",    self._cmd_code_audit))
+        app.add_handler(CommandHandler("threat_intel",  self._cmd_threat_intel))
+        app.add_handler(CommandHandler("update_self",   self._cmd_update_self))
+        app.add_handler(CommandHandler("tools",         self._cmd_tools))
+        app.add_handler(CommandHandler("logs",          self._cmd_logs))
+        app.add_handler(CommandHandler("system",        self._cmd_system))
+        app.add_handler(CommandHandler("swarm_status",   self._cmd_swarm_status))
+        app.add_handler(CommandHandler("swarm_agents",   self._cmd_swarm_agents))
+        app.add_handler(CommandHandler("swarm_models",   self._cmd_swarm_models))
+        app.add_handler(CommandHandler("run_swarm_task", self._cmd_run_swarm_task))
+        app.add_handler(CommandHandler("model_router",   self._cmd_model_router))
+        app.add_handler(CommandHandler("system_status",  self._cmd_system_status))
 
-        for command, handler in command_handlers:
-            app.add_handler(CommandHandler(command, handler))
+        app.add_handler(CommandHandler("dev_status",     self._cmd_dev_status))
+        app.add_handler(CommandHandler("dev_task",       self._cmd_dev_task))
+        app.add_handler(CommandHandler("dev_tool",       self._cmd_dev_tool))
+        app.add_handler(CommandHandler("dev_patch",      self._cmd_dev_patch))
+        app.add_handler(CommandHandler("dev_review",     self._cmd_dev_review))
+        app.add_handler(CommandHandler("dev_rollback",   self._cmd_dev_rollback))
+        app.add_handler(CommandHandler("dev_deploy",     self._cmd_dev_deploy))
+        app.add_handler(CommandHandler("dev_memory",     self._cmd_dev_memory))
+        app.add_handler(CommandHandler("dev_suggestion", self._cmd_dev_suggestion))
 
+        # Inline keyboard callbacks
         app.add_handler(CallbackQueryHandler(self._callback_query))
+
+        # Free-text messages → LLM conversation
         app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
         )
 
+    # ------------------------------------------------------------------
+    # Guards
+    # ------------------------------------------------------------------
+
     def _is_admin(self, user_id: int, username: str = "") -> bool:
-        has_id_list = bool(settings.TELEGRAM_ADMIN_IDS)
+        """
+        Return True if the user is an authorised admin.
+        Checks both numeric user IDs and Telegram usernames (case-insensitive).
+        If neither list is configured, all users are treated as admins (open mode).
+        """
+        has_id_list       = bool(settings.TELEGRAM_ADMIN_IDS)
         has_username_list = bool(settings.TELEGRAM_ADMIN_USERNAMES)
 
         if not has_id_list and not has_username_list:
-            return True
+            return True  # open mode – no admins configured
 
         if has_id_list and user_id in settings.TELEGRAM_ADMIN_IDS:
             return True
@@ -164,42 +236,42 @@ class TelegramBot:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE,
         admin_required: bool = False,
     ) -> bool:
-        chat_id = update.effective_chat.id
-        user = update.effective_user
+        """Return True if the request should proceed."""
+        chat_id  = update.effective_chat.id
+        user     = update.effective_user
         username = (user.username or "").lower()
 
         if not self._limiter.is_allowed(chat_id):
-            await self._safe_reply(update, "⏳ Rate limit exceeded. Please wait.")
+            await update.message.reply_text("⏳ Rate limit exceeded. Please wait.")
             return False
 
         if admin_required and not self._is_admin(user.id, username):
-            await self._safe_reply(
-                update, "🔒 This command is restricted to administrators."
+            await update.message.reply_text(
+                "🔒 This command is restricted to administrators."
             )
             log.warning(
-                f"Unauthorized attempt: user_id={user.id} "
+                f"Unauthorised attempt: user_id={user.id} "
                 f"username=@{username} command={update.message.text}"
             )
             return False
 
         return True
 
-    async def _safe_reply(self, update: Update, message: str) -> None:
-        try:
-            await update.message.reply_text(message)
-        except Exception as e:
-            log.exception("Failed to send reply", exc_info=e)
+    # ------------------------------------------------------------------
+    # Command handlers
+    # ------------------------------------------------------------------
 
     async def _cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        user = update.effective_user
+        user     = update.effective_user
         username = (user.username or "").lower()
 
         if not await self._guard(update, ctx):
             return
 
-        is_admin = self._is_admin(user.id, username)
+        is_admin    = self._is_admin(user.id, username)
         admin_badge = "🛡️ **Admin**" if is_admin else "👤 User"
 
+        # Always log the user ID so admins can add themselves
         log.info(
             f"User /start: id={user.id} username=@{username} "
             f"name='{user.full_name}' admin={is_admin}"
@@ -221,7 +293,10 @@ class TelegramBot:
             f"{id_hint}\n\n"
             "Type /help to see all available commands."
         )
-        await self._safe_reply(update, msg)
+        try:
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            log.error(f"Failed to send start message: {e}")
     def _llm_model() -> str:
         if settings.LLM_BACKEND == "copilot":
             return settings.COPILOT_MODEL
