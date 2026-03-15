@@ -61,24 +61,36 @@ class TaskPlan:
         ]
 
     def is_complete(self) -> bool:
+        """Check if all subtasks are either done or failed."""
         return all(t.status in ("done", "failed") for t in self.subtasks)
 
 
 class TaskPlanner:
     """LLM-powered task decomposition."""
 
-    async def plan(self, request: str, context: Dict[str, Any] = None) -> TaskPlan:
+    async def plan(self, request: str, context: Optional[Dict[str, Any]] = None) -> TaskPlan:
         """
         Decompose a user request into a TaskPlan with ordered SubTasks.
         Falls back to a single general task if LLM fails.
         """
         context = context or {}
-        subtasks = await self._llm_decompose(request) or self._fallback_plan(request)
+        try:
+            subtasks = await self._llm_decompose(request)
+            if not subtasks:
+                raise ValueError("LLM returned no subtasks.")
+        except Exception as exc:
+            log.warning(f"TaskPlanner: LLM decomposition failed, using fallback. Error: {exc}")
+            subtasks = self._fallback_plan(request)
+
         plan = TaskPlan(original_request=request, subtasks=subtasks, context=context)
         log.info(f"TaskPlanner: decomposed into {len(subtasks)} subtasks.")
         return plan
 
     async def _llm_decompose(self, request: str) -> Optional[List[SubTask]]:
+        """
+        Use the LLM to decompose the request into subtasks.
+        Returns a list of SubTask objects or None if decomposition fails.
+        """
         try:
             response = await model_router.query(
                 prompt=f"User request: {request}",
@@ -88,24 +100,36 @@ class TaskPlanner:
             # Extract JSON from response
             json_match = re.search(r'\[.*\]', response, re.DOTALL)
             if not json_match:
+                log.error("TaskPlanner: No JSON array found in LLM response.")
                 return None
+
             raw = json.loads(json_match.group())
-            return [
-                SubTask(
-                    id=t.get("id", f"task_{i}"),
-                    description=t.get("description", ""),
-                    capability=t.get("capability", "general"),
-                    depends_on=t.get("depends_on", []),
-                    priority=t.get("priority", 2),
-                )
-                for i, t in enumerate(raw)
-            ]
+            if not isinstance(raw, list):
+                log.error("TaskPlanner: LLM response is not a valid JSON array.")
+                return None
+
+            subtasks = []
+            for i, t in enumerate(raw):
+                try:
+                    subtasks.append(SubTask(
+                        id=t.get("id", f"task_{i}"),
+                        description=t.get("description", ""),
+                        capability=t.get("capability", "general"),
+                        depends_on=t.get("depends_on", []),
+                        priority=t.get("priority", 2),
+                    ))
+                except Exception as subtask_exc:
+                    log.error(f"TaskPlanner: Error parsing subtask {i}: {subtask_exc}")
+            return subtasks
+        except json.JSONDecodeError as json_exc:
+            log.error(f"TaskPlanner: Failed to decode JSON from LLM response: {json_exc}")
         except Exception as exc:
-            log.warning(f"TaskPlanner: LLM decompose failed: {exc}")
-            return None
+            log.error(f"TaskPlanner: Unexpected error during LLM decomposition: {exc}")
+        return None
 
     def _fallback_plan(self, request: str) -> List[SubTask]:
         """Single-task fallback when LLM decomposition fails."""
+        log.info("TaskPlanner: Falling back to single-task plan.")
         return [SubTask(
             id="main_task",
             description=request,
