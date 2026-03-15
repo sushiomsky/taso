@@ -32,26 +32,26 @@ class DeployManager:
         try:
             if not settings.AUTO_DEPLOY_ON_START:
                 log.info("AUTO_DEPLOY_ON_START is false — skipping bootstrap pull.")
-                self._deployed_sha = await self._get_current_sha()
+                self._deployed_sha = await self._safe_get_current_sha()
                 return True
 
             if not settings.GITHUB_REPO_URL:
                 log.info("No GITHUB_REPO_URL configured — skipping pull.")
-                self._deployed_sha = await self._get_current_sha()
+                self._deployed_sha = await self._safe_get_current_sha()
                 return True
 
             log.info("Pulling latest from GitHub...")
-            if not await git_pull():
+            if not await self._safe_git_pull():
                 log.warning("Git pull failed — using local version.")
-                self._deployed_sha = await self._get_current_sha()
+                self._deployed_sha = await self._safe_get_current_sha()
                 return True  # Continue with the local version
 
             if not await self._run_smoke_tests("after pull"):
                 await rollback_manager.rollback(reason="Failed smoke test after git pull")
-                self._deployed_sha = await self._get_current_sha()
+                self._deployed_sha = await self._safe_get_current_sha()
                 return False
 
-            self._deployed_sha = await self._get_current_sha()
+            self._deployed_sha = await self._safe_get_current_sha()
             log.info(f"Deployed SHA: {self._deployed_sha}")
             return True
         except Exception as e:
@@ -71,15 +71,21 @@ class DeployManager:
         """
         try:
             if run_tests and not await self._run_all_tests():
+                log.error("Tests failed. Aborting commit and push.")
                 return None
 
-            sha = await git_commit(message, version_id)
+            sha = await self._safe_git_commit(message, version_id)
             if not sha:
                 log.error("Git commit failed.")
                 return None
 
-            await git_tag(version_id, f"{author_agent}: {message[:60]}")
-            await git_push()
+            if not await self._safe_git_tag(version_id, f"{author_agent}: {message[:60]}"):
+                log.error("Git tag failed.")
+                return None
+
+            if not await self._safe_git_push():
+                log.error("Git push failed.")
+                return None
 
             self._deployed_sha = sha
             log.info(f"Deployed {version_id} (SHA: {sha})")
@@ -117,7 +123,7 @@ class DeployManager:
             log.exception(f"Unexpected error during smoke tests {context}: {e}")
             return False
 
-    async def _get_current_sha(self) -> Optional[str]:
+    async def _safe_get_current_sha(self) -> Optional[str]:
         """
         Safely retrieves the current git SHA.
         """
@@ -126,6 +132,52 @@ class DeployManager:
         except Exception as e:
             log.exception(f"Failed to retrieve current git SHA: {e}")
             return None
+
+    async def _safe_git_pull(self) -> bool:
+        """
+        Safely performs a git pull operation.
+        Returns True if successful, False otherwise.
+        """
+        try:
+            return await git_pull()
+        except Exception as e:
+            log.exception(f"Git pull failed: {e}")
+            return False
+
+    async def _safe_git_commit(self, message: str, version_id: str) -> Optional[str]:
+        """
+        Safely performs a git commit operation.
+        Returns the commit SHA if successful, None otherwise.
+        """
+        try:
+            return await git_commit(message, version_id)
+        except Exception as e:
+            log.exception(f"Git commit failed: {e}")
+            return None
+
+    async def _safe_git_tag(self, version_id: str, tag_message: str) -> bool:
+        """
+        Safely performs a git tag operation.
+        Returns True if successful, False otherwise.
+        """
+        try:
+            await git_tag(version_id, tag_message)
+            return True
+        except Exception as e:
+            log.exception(f"Git tag failed: {e}")
+            return False
+
+    async def _safe_git_push(self) -> bool:
+        """
+        Safely performs a git push operation.
+        Returns True if successful, False otherwise.
+        """
+        try:
+            await git_push()
+            return True
+        except Exception as e:
+            log.exception(f"Git push failed: {e}")
+            return False
 
     @property
     def current_sha(self) -> Optional[str]:
