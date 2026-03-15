@@ -120,3 +120,54 @@ async def ollama_health(base_url: Optional[str] = None) -> bool:
                 return resp.status == 200
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# OllamaClient class — thin object-oriented wrapper around the module-level
+# async helpers so callers can import `OllamaClient` and instantiate it.
+# ---------------------------------------------------------------------------
+
+class OllamaClient:
+    """
+    Object-oriented Ollama client.
+
+    Usage::
+
+        client = OllamaClient(base_url="http://localhost:11434")
+        reply  = await client.chat("llama3", "Hello!")
+        models = await client.list_models()
+        ok     = await client.health()
+    """
+
+    def __init__(self, base_url: Optional[str] = None, timeout: int = 180) -> None:
+        self.base_url = base_url or settings.OLLAMA_BASE_URL
+        self.timeout  = timeout
+
+    async def chat(
+        self,
+        model: str,
+        prompt: str,
+        system: str = "",
+        history: Optional[List[Dict]] = None,
+    ) -> str:
+        """Send a prompt and return the model reply."""
+        return await ollama_chat(
+            model=model,
+            prompt=prompt,
+            system=system,
+            history=history,
+            base_url=self.base_url,
+            timeout=self.timeout,
+        )
+
+    async def list_models(self) -> List[str]:
+        """Return available model names."""
+        return await ollama_list_models(base_url=self.base_url)
+
+    async def pull(self, model: str) -> bool:
+        """Pull a model."""
+        return await ollama_pull(model=model, base_url=self.base_url)
+
+    async def health(self) -> bool:
+        """Check server reachability."""
+        return await ollama_health(base_url=self.base_url)

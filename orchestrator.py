@@ -106,11 +106,12 @@ class Orchestrator:
         from agents.analysis_agent import AnalysisAgent
         from agents.developer_agent import DeveloperAgent
         from agents.self_healing_agent import SelfHealingAgent
+        from agents.monitoring_agent import MonitoringAgent
 
         agent_classes = [
             CoordinatorAgent, SecurityAnalysisAgent, ResearchAgent, DevAgent,
             MemoryAgent, SystemAgent, PlannerAgent, CoderAgent, AnalysisAgent,
-            DeveloperAgent, SelfHealingAgent
+            DeveloperAgent, SelfHealingAgent, MonitoringAgent,
         ]
 
         agents = []

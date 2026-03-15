@@ -107,6 +107,8 @@ class TelegramBot:
         BotCommand("models",     "Show registered LLM models"),
         BotCommand("learn_repo", "Learn from a GitHub repository URL"),
         BotCommand("add_feature","Generate and register a new feature"),
+        BotCommand("create_agent","Autonomously generate and register a new agent"),
+        BotCommand("create_tool", "Autonomously generate and register a new tool"),
     ]
 
     def __init__(
@@ -205,6 +207,8 @@ class TelegramBot:
         app.add_handler(CommandHandler("models",      self._cmd_models))
         app.add_handler(CommandHandler("learn_repo",  self._cmd_learn_repo))
         app.add_handler(CommandHandler("add_feature", self._cmd_add_feature))
+        app.add_handler(CommandHandler("create_agent", self._cmd_create_agent))
+        app.add_handler(CommandHandler("create_tool",  self._cmd_create_tool))
 
         # Inline keyboard callbacks
         app.add_handler(CallbackQueryHandler(self._callback_query))
@@ -725,9 +729,11 @@ class TelegramBot:
         "dev_rollback":  "_nlp_dev_rollback",
         "dev_deploy":    "_nlp_dev_deploy",
         "dev_suggestion":"_nlp_dev_suggestion",
-        "models":      "_nlp_models",
-        "learn_repo":  "_nlp_learn_repo",
-        "add_feature": "_nlp_add_feature",
+        "models":        "_nlp_models",
+        "learn_repo":    "_nlp_learn_repo",
+        "add_feature":   "_nlp_add_feature",
+        "create_agent":  "_nlp_create_agent",
+        "create_tool":   "_nlp_create_tool",
         "chat":          "_nlp_chat",
     }
 
@@ -760,6 +766,8 @@ class TelegramBot:
         "- models: show registered LLM models and their status\n"
         "- learn_repo: learn from a GitHub repository URL (arg: github URL)\n"
         "- add_feature: create a new feature or tool (arg: feature description)\n"
+        "- create_agent: autonomously generate a new agent (arg: agent description)\n"
+        "- create_tool: autonomously generate and register a new tool (arg: tool description)\n"
         "- chat: general conversation, questions, anything else\n\n"
         "Respond with ONLY valid JSON:\n"
         '{"intent": "<intent>", "arg": "<extracted argument or empty string>", '
@@ -991,6 +999,16 @@ class TelegramBot:
     async def _nlp_add_feature(self, update, ctx, arg, history) -> Optional[str]:
         ctx.args = arg.split() if arg else []
         await self._cmd_add_feature(update, ctx)
+        return None
+
+    async def _nlp_create_agent(self, update, ctx, arg, history) -> Optional[str]:
+        ctx.args = arg.split() if arg else []
+        await self._cmd_create_agent(update, ctx)
+        return None
+
+    async def _nlp_create_tool(self, update, ctx, arg, history) -> Optional[str]:
+        ctx.args = arg.split() if arg else []
+        await self._cmd_create_tool(update, ctx)
         return None
 
     async def _nlp_chat(self, update, ctx, arg, history) -> Optional[str]:
@@ -1416,3 +1434,79 @@ class TelegramBot:
                 text[i: i + chunk_size], parse_mode=parse_mode
             )
             await asyncio.sleep(0.2)
+
+    # ------------------------------------------------------------------
+    # /create_agent – autonomously generate a new agent
+    # ------------------------------------------------------------------
+
+    async def _cmd_create_agent(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if not await self._guard(update, ctx):
+            return
+        try:
+            description = " ".join(ctx.args) if ctx.args else ""
+            if not description:
+                await update.message.reply_text(
+                    "🤖 *Create Agent*\n\n"
+                    "Usage: `/create_agent <description>`\n\n"
+                    "Example: `/create_agent An agent that monitors Tor hidden services for threat intel`",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            await update.message.reply_text(
+                f"🧬 Generating new agent for: _{description}_\n\n"
+                "This may take 30–60 seconds…",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+
+            result = await self._dispatch("developer.create_agent", {
+                "description": description,
+                "agent_name": "",
+            })
+
+            text = result.get("result", result.get("error", "No response"))
+            await self._reply_long(update, text)
+
+        except Exception as exc:
+            log.exception("create_agent command error")
+            await update.message.reply_text(f"❌ Error: {exc}")
+
+    # ------------------------------------------------------------------
+    # /create_tool – dynamically generate a new tool via LLM
+    # ------------------------------------------------------------------
+
+    async def _cmd_create_tool(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if not await self._guard(update, ctx):
+            return
+        try:
+            description = " ".join(ctx.args) if ctx.args else ""
+            if not description:
+                await update.message.reply_text(
+                    "🔧 *Create Tool*\n\n"
+                    "Usage: `/create_tool <description>`\n\n"
+                    "Example: `/create_tool A tool that fetches the latest CVEs from NVD for a given keyword`",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            await update.message.reply_text(
+                f"⚙️ Generating tool: _{description}_\n\n"
+                "Generating → Testing in sandbox → Registering…",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+
+            result = await self._dispatch("developer.request", {
+                "action": "generate_tool",
+                "task":   description,
+            })
+
+            text = result.get("result", result.get("error", "No response"))
+            await self._reply_long(update, text)
+
+        except Exception as exc:
+            log.exception("create_tool command error")
+            await update.message.reply_text(f"❌ Error: {exc}")

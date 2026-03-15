@@ -234,3 +234,9 @@ class SecurityAnalysisAgent(BaseAgent):
                 },
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible alias so the module can be imported as SecurityAgent
+# ---------------------------------------------------------------------------
+SecurityAgent = SecurityAnalysisAgent

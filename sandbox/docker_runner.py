@@ -253,3 +253,66 @@ async def _force_remove(name: str) -> None:
         log.warning(f"Timeout while force-removing container: {name}")
     except Exception as exc:
         log.warning(f"Error during force-remove of container {name}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# DockerRunner class — OO wrapper around the module-level async helpers
+# ---------------------------------------------------------------------------
+
+class DockerRunner:
+    """
+    Object-oriented Docker sandbox runner.
+
+    Usage::
+
+        runner = DockerRunner(image="python:3.11-slim", timeout=30)
+        result = await runner.run_code("print('hello')")
+    """
+
+    def __init__(
+        self,
+        image: str = "",
+        timeout: int = 0,
+        network: Optional[bool] = None,
+    ) -> None:
+        self.image   = image or settings.DOCKER_SANDBOX_IMAGE
+        self.timeout = timeout or settings.DOCKER_TIMEOUT
+        self.network = network
+
+    async def run_code(
+        self,
+        code: str,
+        env: Dict[str, str] = {},
+        packages: List[str] = [],
+    ) -> ContainerResult:
+        """Execute Python code in an isolated container."""
+        return await run_code(
+            code=code,
+            image=self.image,
+            timeout=self.timeout,
+            env=env,
+            packages=packages,
+            network=self.network,
+        )
+
+    async def run_command(
+        self,
+        command: List[str],
+        workdir: str = "/workspace",
+        env: Dict[str, str] = {},
+        mounts: Dict[str, str] = {},
+    ) -> ContainerResult:
+        """Run an arbitrary command in a throwaway container."""
+        return await run_command(
+            command=command,
+            image=self.image,
+            workdir=workdir,
+            timeout=self.timeout,
+            env=env,
+            mounts=mounts,
+            network=self.network,
+        )
+
+    async def pull_image(self) -> bool:
+        """Ensure the sandbox image is available."""
+        return await pull_image(self.image)
