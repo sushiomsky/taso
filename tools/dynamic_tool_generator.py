@@ -76,6 +76,7 @@ class DynamicToolGenerator:
         # 1. Generate code
         code = await self._generate_code(task_description)
         if not code:
+            log.error("Failed to generate tool code: LLM returned no output")
             raise RuntimeError("LLM failed to generate tool code")
 
         # 2. Validate Python syntax
