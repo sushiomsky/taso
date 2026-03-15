@@ -56,6 +56,7 @@ class Settings:
     TELEGRAM_ADMIN_USERNAMES: List[str] = [
         u.lower().lstrip("@") for u in _env_list("TELEGRAM_ADMIN_USERNAMES")
     ]
+    TELEGRAM_ADMIN_CHAT_ID: str = _env("TELEGRAM_ADMIN_CHAT_ID", "")
 
     # --- LLM backend -----------------------------------------------------
     # Supported backends: "ollama" | "openai" | "anthropic" | "copilot"
@@ -111,6 +112,7 @@ class Settings:
     LOG_DIR: Path = BASE_DIR / "logs"
     LOG_LEVEL: str = _env("LOG_LEVEL", "INFO")
     LOG_ROTATION: str = _env("LOG_ROTATION", "50 MB")
+    LOG_MONITOR_ENABLED: bool = _env_bool("LOG_MONITOR_ENABLED", False)
 
     # --- Self-improvement ------------------------------------------------
     SELF_IMPROVE_ENABLED: bool = _env_bool("SELF_IMPROVE_ENABLED", False)

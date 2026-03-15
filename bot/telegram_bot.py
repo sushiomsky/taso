@@ -104,6 +104,9 @@ class TelegramBot:
         BotCommand("dev_deploy",     "Deploy latest from GitHub"),
         BotCommand("dev_memory",     "Query version history and logs"),
         BotCommand("dev_suggestion", "Get bot self-improvement suggestions"),
+        BotCommand("models",     "Show registered LLM models"),
+        BotCommand("learn_repo", "Learn from a GitHub repository URL"),
+        BotCommand("add_feature","Generate and register a new feature"),
     ]
 
     def __init__(
@@ -199,6 +202,9 @@ class TelegramBot:
         app.add_handler(CommandHandler("dev_deploy",     self._cmd_dev_deploy))
         app.add_handler(CommandHandler("dev_memory",     self._cmd_dev_memory))
         app.add_handler(CommandHandler("dev_suggestion", self._cmd_dev_suggestion))
+        app.add_handler(CommandHandler("models",      self._cmd_models))
+        app.add_handler(CommandHandler("learn_repo",  self._cmd_learn_repo))
+        app.add_handler(CommandHandler("add_feature", self._cmd_add_feature))
 
         # Inline keyboard callbacks
         app.add_handler(CallbackQueryHandler(self._callback_query))
@@ -719,6 +725,9 @@ class TelegramBot:
         "dev_rollback":  "_nlp_dev_rollback",
         "dev_deploy":    "_nlp_dev_deploy",
         "dev_suggestion":"_nlp_dev_suggestion",
+        "models":      "_nlp_models",
+        "learn_repo":  "_nlp_learn_repo",
+        "add_feature": "_nlp_add_feature",
         "chat":          "_nlp_chat",
     }
 
@@ -748,6 +757,9 @@ class TelegramBot:
         "- dev_rollback: rollback to previous version\n"
         "- dev_deploy: deploy latest code from GitHub\n"
         "- dev_suggestion: ask bot to suggest improvements\n"
+        "- models: show registered LLM models and their status\n"
+        "- learn_repo: learn from a GitHub repository URL (arg: github URL)\n"
+        "- add_feature: create a new feature or tool (arg: feature description)\n"
         "- chat: general conversation, questions, anything else\n\n"
         "Respond with ONLY valid JSON:\n"
         '{"intent": "<intent>", "arg": "<extracted argument or empty string>", '
@@ -965,6 +977,20 @@ class TelegramBot:
 
     async def _nlp_dev_suggestion(self, update, ctx, arg, history) -> Optional[str]:
         await self._cmd_dev_suggestion(update, ctx)
+        return None
+
+    async def _nlp_models(self, update, ctx, arg, history) -> Optional[str]:
+        await self._cmd_models(update, ctx)
+        return None
+
+    async def _nlp_learn_repo(self, update, ctx, arg, history) -> Optional[str]:
+        ctx.args = arg.split() if arg else []
+        await self._cmd_learn_repo(update, ctx)
+        return None
+
+    async def _nlp_add_feature(self, update, ctx, arg, history) -> Optional[str]:
+        ctx.args = arg.split() if arg else []
+        await self._cmd_add_feature(update, ctx)
         return None
 
     async def _nlp_chat(self, update, ctx, arg, history) -> Optional[str]:
@@ -1248,6 +1274,108 @@ class TelegramBot:
             )
         except Exception as exc:
             await update.message.reply_text(f"❌ Error: {exc}")
+
+    async def _cmd_models(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, ctx):
+            return
+        from models.model_registry import registry as model_registry
+        from models.model_router import router
+
+        router_s = router.status()
+        uncensored_name = router_s.get("uncensored_model", "")
+        active_backend  = router_s.get("active_backend", settings.LLM_BACKEND)
+
+        lines = [
+            f"🤖 *Registered LLM Models*\n",
+            f"Active backend: `{active_backend}`",
+            f"Uncensored fallback: `{uncensored_name}`\n",
+        ]
+        for m in model_registry.all_models():
+            avail   = "✅" if m.available else "❌"
+            uncens  = "🔓" if m.uncensored else "-"
+            tasks   = ", ".join(t.value for t in m.preferred_tasks)
+            lines.append(
+                f"{avail} {uncens} `{m.name}`\n"
+                f"  Provider: {m.provider.value} | Tasks: {tasks}"
+            )
+        await self._reply_long(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+    async def _cmd_learn_repo(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, ctx, admin_required=True):
+            return
+        url = " ".join(ctx.args).strip() if ctx.args else ""
+        if not url or not url.startswith("http"):
+            await update.message.reply_text(
+                "Usage: `/learn_repo <github_url>`\n\n"
+                "Example: `/learn_repo https://github.com/user/repo`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        await update.message.reply_text(f"📚 Fetching repo knowledge from {url}…")
+
+        chat_id     = update.effective_chat.id
+        reply_topic = f"bot.reply.{chat_id}.{int(time.time())}"
+
+        msg = BusMessage(
+            topic    = "research.learn_repo",
+            sender   = "telegram_bot",
+            payload  = {"url": url, "task_id": reply_topic},
+            reply_to = reply_topic,
+        )
+        response = await self._bus.publish_and_wait(msg, timeout=120.0)
+        if response is None:
+            await update.message.reply_text("⚠️ Timeout waiting for repo knowledge.")
+            return
+
+        data = response.payload
+        if data.get("error"):
+            await update.message.reply_text(f"❌ Error: {data['error']}")
+            return
+
+        files   = data.get("files_learned", 0)
+        repo    = data.get("repo", url)
+        desc    = data.get("description", "")
+        result  = (
+            f"✅ *Repo knowledge ingested*\n\n"
+            f"Repo: `{repo}`\n"
+            f"Files learned: {files}\n"
+            f"Description: {desc[:200] or 'N/A'}"
+        )
+        await self._reply_long(update, result, parse_mode=ParseMode.MARKDOWN)
+
+    async def _cmd_add_feature(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, ctx, admin_required=True):
+            return
+        description = " ".join(ctx.args).strip() if ctx.args else ""
+        if not description:
+            await update.message.reply_text(
+                "Usage: `/add_feature <description>`\n\n"
+                "Example: `/add_feature A tool that checks if a port is open`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        await update.message.reply_text(
+            f"🔨 Planning feature: _{description[:80]}_…",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        try:
+            from swarm.swarm_orchestrator import swarm_orchestrator
+            task = (
+                f"Implement new feature or tool: {description}. "
+                "Generate working Python code, test it, and if it's a tool register it "
+                "in the tool registry."
+            )
+            result = await swarm_orchestrator.run(task)
+            if len(result) > 3800:
+                result = result[:3800] + "\n…[truncated]"
+            await update.message.reply_text(
+                f"✅ *Feature result:*\n\n{result}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as exc:
+            await update.message.reply_text(f"❌ Feature generation error: {exc}")
 
     async def _dispatch_task(
         self, command: str, args: Dict, update: Update

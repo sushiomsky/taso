@@ -44,6 +44,7 @@ class Orchestrator:
             agents = await self._start_agents(bus, db, vector, conv_store)
             await self._initialize_optional_features(agents, bus, db, conv_store)
             bot = await self._start_telegram_bot(bus, agents, tool_registry, conv_store)
+            await self._start_log_monitor(bot)
 
             # Wait for shutdown signal
             await self._wait_for_shutdown()
@@ -167,6 +168,55 @@ class Orchestrator:
         )
         await bot.start()
         return bot
+
+    async def _start_log_monitor(self, bot=None) -> None:
+        """Start the background log monitor if LOG_MONITOR_ENABLED=true."""
+        if not settings.LOG_MONITOR_ENABLED:
+            return
+        asyncio.create_task(self._log_monitor_loop(bot))
+        log.info("Log monitor background task scheduled.")
+
+    async def _log_monitor_loop(self, bot=None) -> None:
+        """Every 5 minutes check for new errors and alert admin."""
+        from tools.log_monitor import LogMonitorTool
+        monitor = LogMonitorTool()
+        last_error_count = 0
+        await asyncio.sleep(60)  # initial delay
+
+        while True:
+            try:
+                result = await monitor.run(lines=500, min_severity="ERROR")
+                if result.get("success"):
+                    data = result["result"]
+                    total_errors = data.get("total_errors", 0)
+                    new_errors = total_errors - last_error_count
+                    if new_errors > 0:
+                        summary = data.get("summary", "")
+                        text = f"⚠️ Log monitor: {new_errors} new error(s) detected\n\n{summary}"
+                        # Send alert via Telegram if bot is available
+                        if bot is not None and hasattr(bot, "_app") and bot._app is not None:
+                            try:
+                                from config.settings import settings as _s
+                                admin_chat_id = int(_s.TELEGRAM_ADMIN_CHAT_ID) if hasattr(_s, "TELEGRAM_ADMIN_CHAT_ID") and _s.TELEGRAM_ADMIN_CHAT_ID else None
+                                if admin_chat_id is None:
+                                    import os
+                                    raw = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "")
+                                    admin_chat_id = int(raw) if raw.isdigit() else None
+                                if admin_chat_id:
+                                    await bot._app.bot.send_message(chat_id=admin_chat_id, text=text)
+                            except Exception as exc:
+                                log.warning(f"Log monitor: failed to send alert: {exc}")
+                        else:
+                            log.warning(f"Log monitor alert (no bot): {text}")
+                        last_error_count = total_errors
+                    else:
+                        # Reset counter if log was rotated (total_errors < last_error_count)
+                        if total_errors < last_error_count:
+                            last_error_count = total_errors
+            except Exception as exc:
+                log.error(f"Log monitor loop error: {exc}", exc_info=True)
+
+            await asyncio.sleep(300)  # 5 minutes
 
     async def _wait_for_shutdown(self):
         """Wait for a shutdown signal."""

@@ -60,6 +60,7 @@ class ResearchAgent(BaseAgent):
     async def _register_subscriptions(self) -> None:
         self._bus.subscribe("research.threat_intel", self._handle_threat_intel)
         self._bus.subscribe("research.search_cve",   self._handle_search_cve)
+        self._bus.subscribe("research.learn_repo",   self._handle_learn_repo)
 
     # ------------------------------------------------------------------
     # Handlers
@@ -279,3 +280,136 @@ class ResearchAgent(BaseAgent):
                 },
             )
         )
+
+    async def _handle_learn_repo(self, msg: BusMessage) -> None:
+        """Fetch a GitHub repo and store its content in KnowledgeDB."""
+        url      = msg.payload.get("url", "")
+        task_id  = msg.payload.get("task_id", "")
+
+        log.info(f"ResearchAgent: learn_repo url={url}")
+
+        import re as _re
+        m = _re.search(r"github\.com/([^/]+)/([^/\s?#]+)", url)
+        if not m:
+            result = {"error": f"Could not parse GitHub URL: {url}", "task_id": task_id}
+            await self._reply_learn(msg, result)
+            return
+
+        owner = m.group(1)
+        repo  = m.group(2).rstrip(".git")
+        full  = f"{owner}/{repo}"
+
+        headers = {"User-Agent": "TASO/1.0"}
+        if settings.GITHUB_TOKEN:
+            headers["Authorization"] = f"token {settings.GITHUB_TOKEN}"
+
+        files_learned = 0
+        description   = ""
+
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                # 1. Repo metadata
+                async with session.get(
+                    f"https://api.github.com/repos/{full}",
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status == 200:
+                        meta = await resp.json()
+                        description = meta.get("description") or ""
+                    else:
+                        description = ""
+
+                # 2. README
+                readme_text = ""
+                for branch in ("main", "master"):
+                    async with session.get(
+                        f"https://raw.githubusercontent.com/{full}/{branch}/README.md",
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as resp:
+                        if resp.status == 200:
+                            readme_text = await resp.text()
+                            break
+
+                if readme_text:
+                    await self._store_advisory(
+                        source="github_repo",
+                        title=f"{full}/README.md",
+                        summary=readme_text[:500],
+                    )
+                    files_learned += 1
+
+                # 3. File tree
+                tree_items = []
+                async with session.get(
+                    f"https://api.github.com/repos/{full}/git/trees/HEAD?recursive=1",
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status == 200:
+                        tree_data = await resp.json()
+                        tree_items = tree_data.get("tree", [])
+
+                # 4. Fetch .py files ≤ 10KB
+                for item in tree_items:
+                    if not item.get("path", "").endswith(".py"):
+                        continue
+                    size = item.get("size", 0)
+                    if size > 10240:
+                        continue
+                    raw_url = (
+                        f"https://raw.githubusercontent.com/{full}/HEAD/{item['path']}"
+                    )
+                    try:
+                        async with session.get(
+                            raw_url, timeout=aiohttp.ClientTimeout(total=10)
+                        ) as resp:
+                            if resp.status != 200:
+                                continue
+                            content = await resp.text()
+                    except Exception:
+                        continue
+
+                    await self._store_advisory(
+                        source="github_repo",
+                        title=f"{full}/{item['path']}",
+                        summary=content[:500],
+                    )
+                    files_learned += 1
+
+        except Exception as exc:
+            log.error(f"ResearchAgent learn_repo error: {exc}", exc_info=True)
+            result = {"error": str(exc), "task_id": task_id}
+            await self._reply_learn(msg, result)
+            return
+
+        result = {
+            "task_id":       task_id,
+            "repo":          full,
+            "description":   description,
+            "files_learned": files_learned,
+        }
+        await self._reply_learn(msg, result)
+
+    async def _store_advisory(self, source: str, title: str, summary: str) -> None:
+        """Store a piece of knowledge as an advisory in KnowledgeDB via bus."""
+        await self._bus.publish(
+            BusMessage(
+                topic="memory.store",
+                sender=self.name,
+                payload={
+                    "category": "advisory",
+                    "text":     summary,
+                    "metadata": {"source": source, "title": title},
+                },
+            )
+        )
+
+    async def _reply_learn(self, msg: BusMessage, result: Dict) -> None:
+        if msg.reply_to:
+            await self._bus.publish(
+                BusMessage(
+                    topic=msg.reply_to,
+                    sender=self.name,
+                    recipient=msg.sender,
+                    payload=result,
+                )
+            )
