@@ -28,20 +28,16 @@ class SelfHealingAgent(BaseAgent):
         try:
             action = msg.payload.get("action", "")
 
-            if action == "commit_and_push":
-                result = await self._commit_push(
-                    message=msg.payload.get("message", "TASO auto-commit"),
-                    version_id=msg.payload.get("version_id", ""),
-                )
-            elif action == "rollback":
-                result = await self._rollback(
-                    reason=msg.payload.get("reason", "manual rollback"),
-                    target_sha=msg.payload.get("sha"),
-                )
-            elif action == "deploy":
-                result = await self._deploy()
-            elif action == "status":
-                result = self._status()
+            action_handlers = {
+                "commit_and_push": self._commit_push,
+                "rollback": self._rollback,
+                "deploy": self._deploy,
+                "status": self._status,
+            }
+
+            if action in action_handlers:
+                handler = action_handlers[action]
+                result = await handler(**msg.payload) if asyncio.iscoroutinefunction(handler) else handler()
             else:
                 result = f"❌ Unknown action: {action}"
 
@@ -92,7 +88,7 @@ class SelfHealingAgent(BaseAgent):
             log.error(f"Error during commit and push: {e}", exc_info=True)
             return f"❌ Commit/push failed due to an error: {e}"
 
-    async def _rollback(self, reason: str, target_sha: str = None) -> str:
+    async def _rollback(self, reason: str, target_sha: Optional[str] = None) -> str:
         try:
             from self_healing.rollback_manager import rollback_manager
             from self_healing.git_manager import git_current_sha
