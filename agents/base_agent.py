@@ -49,7 +49,7 @@ class BaseAgent(ABC):
         except Exception as exc:
             self._log.exception(f"Failed to start agent '{self.name}': {exc}")
             self._running = False
-            raise
+            raise RuntimeError(f"Failed to start agent '{self.name}'") from exc
 
     async def stop(self) -> None:
         """Cancel all running tasks."""
@@ -63,9 +63,9 @@ class BaseAgent(ABC):
             results = await asyncio.gather(*self._tasks, return_exceptions=True)
             for result in results:
                 if isinstance(result, asyncio.CancelledError):
-                    self._log.info(f"Task cancelled: {result}")
+                    self._log.info("Task cancelled.")
                 elif isinstance(result, Exception):
-                    self._log.exception(f"Error while stopping task: {result}")
+                    self._log.exception("Error while stopping task.", exc_info=result)
         self._tasks.clear()
         self._log.info(f"Agent '{self.name}' stopped.")
 
@@ -132,8 +132,12 @@ class BaseAgent(ABC):
         Execute a registered tool (static or dynamic) by name.
         Returns dict with {success, result, error}.
         """
-        from tools.base_tool import registry as tool_registry
-        return await tool_registry.call_tool(name, **kwargs)
+        try:
+            from tools.base_tool import registry as tool_registry
+            return await tool_registry.call_tool(name, **kwargs)
+        except Exception as exc:
+            self._log.exception(f"Error calling tool '{name}': {exc}")
+            return {"success": False, "result": None, "error": str(exc)}
 
     def tool_exists(self, name: str) -> bool:
         """Return True if a tool (static or dynamic) is registered under name."""
@@ -182,10 +186,10 @@ async def _ollama_query(prompt: str, system: str,
                 return data.get("message", {}).get("content", "")
     except aiohttp.ClientResponseError as e:
         log.error(f"Ollama query failed with HTTP error: {e.status} {e.message}")
-        raise
+        raise RuntimeError(f"Ollama query failed with HTTP error: {e.status}") from e
     except aiohttp.ClientError as e:
         log.error(f"Ollama query failed: {e}")
-        raise
+        raise RuntimeError("Ollama query failed due to a client error.") from e
 
 
 async def _openai_query(prompt: str, system: str,
@@ -211,10 +215,10 @@ async def _openai_query(prompt: str, system: str,
         raise _AuthError("Authentication failed for OpenAI API.") from e
     except openai.error.OpenAIError as e:
         log.error(f"OpenAI query failed: {e}")
-        raise
+        raise RuntimeError("OpenAI query failed.") from e
     except Exception as e:
         log.error(f"Unexpected error during OpenAI query: {e}")
-        raise
+        raise RuntimeError("Unexpected error during OpenAI query.") from e
 
 
 async def _anthropic_query(prompt: str, system: str,
@@ -239,10 +243,10 @@ async def _anthropic_query(prompt: str, system: str,
         raise _AuthError("Authentication failed for Anthropic API.") from e
     except anthropic.exceptions.AnthropicError as e:
         log.error(f"Anthropic query failed: {e}")
-        raise
+        raise RuntimeError("Anthropic query failed.") from e
     except Exception as e:
         log.error(f"Unexpected error during Anthropic query: {e}")
-        raise
+        raise RuntimeError("Unexpected error during Anthropic query.") from e
 
 
 async def _copilot_query(prompt: str, system: str,
@@ -319,7 +323,7 @@ async def _copilot_query(prompt: str, system: str,
                 return data["choices"][0]["message"]["content"]
     except aiohttp.ClientResponseError as e:
         log.error(f"Copilot query failed with HTTP error: {e.status} {e.message}")
-        raise
+        raise RuntimeError(f"Copilot query failed with HTTP error: {e.status}") from e
     except aiohttp.ClientError as e:
         log.error(f"Copilot query failed: {e}")
-        raise
+        raise RuntimeError("Copilot query failed due to a client error.") from e
