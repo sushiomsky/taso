@@ -66,7 +66,7 @@ class AuditEntry:
     def dt(self) -> str:
         """Human-readable UTC timestamp."""
         import datetime
-        return datetime.datetime.utcfromtimestamp(self.ts).strftime("%Y-%m-%d %H:%M:%S")
+        return datetime.datetime.fromtimestamp(self.ts, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ---------------------------------------------------------------------------

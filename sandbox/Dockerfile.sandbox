@@ -1,0 +1,35 @@
+# ============================================================
+# TASO Sandbox – Custom Docker Image
+# Extends python:3.11-slim with security analysis tools
+# ============================================================
+FROM python:3.11-slim
+
+LABEL description="TASO sandbox image for isolated code execution"
+
+# Security tools commonly needed in sandbox runs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    nmap \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Python security/utility packages available inside the sandbox
+RUN pip install --no-cache-dir \
+    requests \
+    aiohttp \
+    httpx \
+    beautifulsoup4 \
+    lxml \
+    pydantic \
+    cryptography \
+    paramiko \
+    scapy \
+    bandit \
+    semgrep \
+    && pip cache purge
+
+# Non-root user for extra isolation
+RUN useradd -m -u 1000 sandbox
+USER sandbox
+
+WORKDIR /sandbox

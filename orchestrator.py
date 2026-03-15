@@ -276,22 +276,35 @@ class Orchestrator:
         from self_improvement.code_analyzer import CodeAnalyzer
         from self_improvement.patch_generator import PatchGenerator
         from self_improvement.auto_deployer import AutoDeployer
+        from memory.audit_log import audit_log as _audit_log
 
         interval = 3600  # run once per hour
 
         await asyncio.sleep(300)  # initial delay on startup
+        await _audit_log.connect()
+
+        async def _audit_bridge(actor, action, target, status, detail):
+            """Bridge old audit_callable signature into new AuditLog."""
+            await _audit_log.record(
+                agent=actor,
+                action=action,
+                input_summary=str(target)[:512],
+                output_summary=str(detail)[:512],
+                success=(status in ("deployed", "skipped", "no_issues")),
+                error=str(detail) if status in ("rejected", "failed") else None,
+            )
 
         while True:
             try:
                 log.info("Self-improvement loop: starting analysis cycle.")
-                analyser = CodeAnalyzer()
+                analyser  = CodeAnalyzer()
                 generator = PatchGenerator(llm_callable=coordinator.llm_query)
-                deployer = AutoDeployer(audit_callable=db.audit)
+                deployer  = AutoDeployer(audit_callable=_audit_bridge)
 
                 results = analyser.analyse_repo(max_files=50)
 
                 for result in results[:3]:  # max 3 files per cycle
-                    fpath = result["file"]
+                    fpath  = result["file"]
                     issues = result["findings"]
 
                     from pathlib import Path
