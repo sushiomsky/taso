@@ -1224,6 +1224,7 @@ class TelegramBot:
 
     async def _nlp_create_tool(self, update, ctx, arg, history) -> Optional[str]:
         ctx.args = arg.split() if arg else []
+        # Route through the confirmation-gated command handler
         await self._cmd_create_tool(update, ctx)
         return None
 
@@ -1259,6 +1260,31 @@ class TelegramBot:
         query = update.callback_query
         await query.answer()
         data = query.data or ""
+
+        # Tool generation confirmation (from /create_tool or NLP create_tool)
+        if data.startswith("gentool:"):
+            description = data[len("gentool:"):]
+            if description == "__cancel__":
+                await query.edit_message_text("❌ Tool generation cancelled.")
+                return
+            await query.edit_message_text(
+                f"⚙️ Generating tool: _{description[:120]}_\n\n"
+                "Generating code → Testing in sandbox → Registering…",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            try:
+                result = await self._dispatch("developer.request", {
+                    "action": "generate_tool",
+                    "task":   description,
+                })
+                text = result.get("result", result.get("error", "No response"))
+                await query.message.reply_text(
+                    text[:4000], parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as exc:
+                log.exception("Tool generation callback error")
+                await query.message.reply_text(f"❌ Error during tool generation: {exc}")
+            return
 
         # Clarification confirmation from _ask_clarification()
         if data.startswith("confirm:"):
@@ -1770,19 +1796,27 @@ class TelegramBot:
                 )
                 return
 
+            # Ask for confirmation before triggering LLM tool generation
+            short = description[:120] + ("…" if len(description) > 120 else "")
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "✅ Yes, generate it",
+                    callback_data=f"gentool:{description[:200]}",
+                ),
+                InlineKeyboardButton(
+                    "❌ Cancel",
+                    callback_data="gentool:__cancel__",
+                ),
+            ]])
             await update.message.reply_text(
-                f"⚙️ Generating tool: _{description}_\n\n"
-                "Generating → Testing in sandbox → Registering…",
+                f"🔧 *Generate new tool?*\n\n"
+                f"_{short}_\n\n"
+                "This will use the LLM to write Python code, test it in a sandbox, "
+                "and register it as a live tool available to all agents.\n\n"
+                "Proceed?",
                 parse_mode=ParseMode.MARKDOWN,
+                reply_markup=keyboard,
             )
-
-            result = await self._dispatch("developer.request", {
-                "action": "generate_tool",
-                "task":   description,
-            })
-
-            text = result.get("result", result.get("error", "No response"))
-            await self._reply_long(update, text)
 
         except Exception as exc:
             log.exception("create_tool command error")
