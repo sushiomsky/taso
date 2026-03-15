@@ -297,7 +297,7 @@ class TelegramBot:
             await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
         except Exception as e:
             log.error(f"Failed to send start message: {e}")
-    def _llm_model() -> str:
+    def _llm_model(self) -> str:
         if settings.LLM_BACKEND == "copilot":
             return settings.COPILOT_MODEL
         elif settings.LLM_BACKEND == "openai":
