@@ -97,7 +97,17 @@ class TaskPlanner:
                 system=_PLANNER_SYSTEM,
                 task_type=TaskType.PLANNING,
             )
-            # Extract JSON from response
+            return self._parse_llm_response(response)
+        except Exception as exc:
+            log.error(f"TaskPlanner: Unexpected error during LLM decomposition: {exc}")
+            return None
+
+    def _parse_llm_response(self, response: str) -> Optional[List[SubTask]]:
+        """
+        Parse the LLM response to extract subtasks.
+        Returns a list of SubTask objects or None if parsing fails.
+        """
+        try:
             json_match = re.search(r'\[.*\]', response, re.DOTALL)
             if not json_match:
                 log.error("TaskPlanner: No JSON array found in LLM response.")
@@ -124,7 +134,7 @@ class TaskPlanner:
         except json.JSONDecodeError as json_exc:
             log.error(f"TaskPlanner: Failed to decode JSON from LLM response: {json_exc}")
         except Exception as exc:
-            log.error(f"TaskPlanner: Unexpected error during LLM decomposition: {exc}")
+            log.error(f"TaskPlanner: Unexpected error during response parsing: {exc}")
         return None
 
     def _fallback_plan(self, request: str) -> List[SubTask]:
