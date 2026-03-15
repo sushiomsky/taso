@@ -1229,25 +1229,105 @@ class TelegramBot:
         return None
 
     async def _nlp_chat(self, update, ctx, arg, history) -> Optional[str]:
-        """General conversation — answer directly via LLM with full context."""
+        """General conversation — ground the answer with live agent context first."""
+        text = arg or (update.message.text if update.message else "") or ""
+
+        # ── 1. Classify what kind of context will help ──────────────────────
+        tl = text.lower()
+        wants_memory = any(w in tl for w in (
+            "cve", "vuln", "exploit", "threat", "malware", "ransomware",
+            "zero-day", "patch", "advisory", "breach", "attack", "payload",
+            "injection", "xss", "rce", "sqli", "lfi", "rfi", "bypass",
+            "pentest", "red team", "osint", "ioc", "ttps", "mitre",
+            "what is", "tell me about", "explain", "how does", "how do",
+            "what are", "latest", "recent", "news", "research",
+        ))
+        wants_system = any(w in tl for w in (
+            "cpu", "ram", "memory", "disk", "uptime", "load", "process",
+            "system", "server", "health", "status", "resource", "swap",
+            "running", "agents", "bot", "service",
+        ))
+
+        context_parts: list[str] = []
+
+        # ── 2. Fetch context in parallel from agents ─────────────────────────
+        tasks = {}
+        reply_base = f"chat.ctx.{int(__import__('time').time())}"
+
+        if wants_memory:
+            mem_reply = reply_base + ".mem"
+            mem_msg = BusMessage(
+                topic    = "memory.query",
+                sender   = "telegram_bot",
+                payload  = {"query": text[:300], "top_k": 4},
+                reply_to = mem_reply,
+            )
+            tasks["memory"] = asyncio.create_task(
+                self._bus.publish_and_wait(mem_msg, timeout=8.0)
+            )
+
+        if wants_system:
+            sys_reply = reply_base + ".sys"
+            sys_msg = BusMessage(
+                topic    = "system.status",
+                sender   = "telegram_bot",
+                payload  = {},
+                reply_to = sys_reply,
+            )
+            tasks["system"] = asyncio.create_task(
+                self._bus.publish_and_wait(sys_msg, timeout=6.0)
+            )
+
+        if tasks:
+            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            result_map = dict(zip(tasks.keys(), results))
+
+            mem_resp = result_map.get("memory")
+            if mem_resp and not isinstance(mem_resp, Exception):
+                payload = mem_resp.payload if hasattr(mem_resp, "payload") else {}
+                vector  = payload.get("vector_results", [])
+                cves    = payload.get("cve_results", [])
+                snippets = []
+                for r in vector[:3]:
+                    snippets.append(f"[{r.get('category','knowledge')}] {r.get('text','')[:200]}")
+                for c in cves[:2]:
+                    snippets.append(
+                        f"[CVE] {c.get('cve_id','')} ({c.get('severity','?')}) "
+                        f"– {c.get('description','')[:180]}"
+                    )
+                if snippets:
+                    context_parts.append(
+                        "Relevant knowledge from memory:\n" + "\n".join(f"• {s}" for s in snippets)
+                    )
+
+            sys_resp = result_map.get("system")
+            if sys_resp and not isinstance(sys_resp, Exception):
+                payload = sys_resp.payload if hasattr(sys_resp, "payload") else {}
+                m = payload.get("metrics", {})
+                if m:
+                    context_parts.append(
+                        f"Live system metrics: CPU {m.get('cpu_pct','?')}% | "
+                        f"RAM {m.get('mem_used_gb','?')} GB / {m.get('mem_total_gb','?')} GB | "
+                        f"Disk {m.get('disk_used_gb','?')} GB used | "
+                        f"Uptime {m.get('uptime_hours','?')} h"
+                    )
+
+        # ── 3. Build system prompt with grounding context ────────────────────
         system = (
-            "You are TASO, an autonomous AI security research assistant. "
+            "You are TASO, an autonomous AI security research assistant running locally. "
             "You help with cybersecurity analysis, threat intelligence, code review, "
-            "and security automation. Be concise, technical, and direct.\n\n"
-            "When the user seems to want to run a command, remind them they can just "
-            "describe what they want in plain English — you will route automatically.\n"
-            "Format responses with markdown where it aids readability."
+            "and security automation. Be concise, technical, and direct. "
+            "Format responses with markdown where it aids readability.\n\n"
+            "When the user seems to want to trigger an action (scan, search, generate), "
+            "remind them they can describe it in plain English."
         )
-        # Inject personalisation hints to adapt tone/style/focus
         hints = ctx.user_data.get("_persona_hints", [])
         if hints:
             system += "\n\n" + "\n".join(hints)
+        if context_parts:
+            system += "\n\n--- Live context ---\n" + "\n\n".join(context_parts)
 
-        response = await self._coordinator.llm_query(
-            arg or (update.message.text if update.message else "") or "",
-            system=system,
-            history=history,
-        )
+        response = await self._coordinator.llm_query(text, system=system, history=history)
         return response
 
     # ------------------------------------------------------------------
