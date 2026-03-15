@@ -89,7 +89,7 @@ class ModelRouter:
 
             return await self._routed_query(prompt, system, history, task_type, allow_uncensored)
         except Exception as exc:
-            log.error(f"ModelRouter: Unexpected error during query routing: {exc}")
+            log.exception("ModelRouter: Unexpected error during query routing")
             return "[ModelRouter: An unexpected error occurred. Please try again later.]"
 
     async def _routed_query(
@@ -160,7 +160,7 @@ class ModelRouter:
             # Fall back to registry preferred model for task
             return self._reg.preferred_for(task_type)
         except Exception as exc:
-            log.error(f"ModelRouter: Error retrieving primary model for {task_type.value}: {exc}")
+            log.exception(f"ModelRouter: Error retrieving primary model for {task_type.value}")
             return None
 
     async def _try_model(
@@ -184,8 +184,12 @@ class ModelRouter:
             else:
                 log.error(f"ModelRouter: Unsupported provider '{entry.provider}' for model '{entry.name}'")
                 return None
+        except asyncio.TimeoutError:
+            log.warning(f"ModelRouter: Timeout while querying model '{entry.name}'")
+            self._reg.mark_unavailable(entry.name)
+            return None
         except Exception as exc:
-            log.warning(f"ModelRouter: '{entry.name}' error: {exc}")
+            log.warning(f"ModelRouter: Error querying model '{entry.name}': {exc}")
             if "connect" in str(exc).lower() or "timeout" in str(exc).lower():
                 self._reg.mark_unavailable(entry.name)
             return None
@@ -212,7 +216,7 @@ class ModelRouter:
                 "registered_models": len(self._reg.all_models()),
             }
         except Exception as exc:
-            log.error(f"ModelRouter: Error retrieving status: {exc}")
+            log.exception("ModelRouter: Error retrieving status")
             return {"error": "Unable to retrieve status."}
 
 
@@ -254,6 +258,9 @@ async def _copilot_call(model: str, prompt: str, system: str, history) -> str:
                 resp.raise_for_status()
                 data = await resp.json()
             return data["choices"][0]["message"]["content"]
+        except asyncio.TimeoutError:
+            log.warning(f"Copilot API call timed out for model '{model}'")
+            raise
         except aiohttp.ClientError as e:
             log.error(f"Copilot API call failed: {e}")
             raise
@@ -272,6 +279,9 @@ async def _openai_call(model: str, prompt: str, system: str, history) -> str:
             model=model, messages=messages, max_tokens=4096
         )
         return resp.choices[0].message.content
+    except asyncio.TimeoutError:
+        log.warning(f"OpenAI API call timed out for model '{model}'")
+        raise
     except openai.error.OpenAIError as e:
         log.error(f"OpenAI API call failed: {e}")
         raise
