@@ -27,8 +27,16 @@ def main() -> None:
     try:
         asyncio.run(orchestrator.run())
     except KeyboardInterrupt:
-        pass
+        print("\nOperation cancelled by user. Exiting gracefully.")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+    finally:
+        print("TASO has been stopped.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"Critical error during startup: {e}")
+        sys.exit(1)
