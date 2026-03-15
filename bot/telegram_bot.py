@@ -545,10 +545,26 @@ class TelegramBot:
         if not await self._guard(update, ctx):
             return
 
-        tool_list = self._tools.list_tools()
-        lines     = [f"🧰 **Available Tools** ({len(tool_list)})\n"]
-        for t in tool_list:
-            lines.append(f"• **{t['name']}** – {t['description']}")
+        tool_list = self._tools.describe_all_tools()
+        if not tool_list:
+            await update.message.reply_text(
+                "🧰 No tools registered yet. Use `/create_tool <description>` to generate one.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        static  = [t for t in tool_list if not t.get("dynamic")]
+        dynamic = [t for t in tool_list if t.get("dynamic")]
+
+        lines = [f"🧰 *Available Tools* ({len(tool_list)})\n"]
+        if static:
+            lines.append("*Built-in:*")
+            for t in static:
+                lines.append(f"  • `{t['name']}` – {t.get('description','')[:80]}")
+        if dynamic:
+            lines.append("\n*Dynamic (AI-generated):*")
+            for t in dynamic:
+                lines.append(f"  • `{t['name']}` – {t.get('description','')[:80]}")
 
         await self._reply_long(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
@@ -1399,6 +1415,20 @@ class TelegramBot:
             )
         except Exception as exc:
             await update.message.reply_text(f"❌ Feature generation error: {exc}")
+
+    async def _dispatch(self, topic: str, payload: Dict) -> Dict[str, Any]:
+        """Publish a bus message directly to a topic and await the response."""
+        msg = BusMessage(
+            topic   = topic,
+            sender  = "telegram_bot",
+            payload = payload,
+        )
+        response = await self._bus.publish_and_wait(msg, timeout=90.0)
+        if response is None:
+            return {"error": "timeout"}
+        if isinstance(response, dict):
+            return response
+        return response.payload if hasattr(response, "payload") else {}
 
     async def _dispatch_task(
         self, command: str, args: Dict, update: Update
