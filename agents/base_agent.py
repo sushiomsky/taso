@@ -47,7 +47,7 @@ class BaseAgent(ABC):
             await self._register_subscriptions()
             self._log.info(f"Agent '{self.name}' started.")
         except Exception as exc:
-            self._log.error(f"Failed to start agent '{self.name}': {exc}")
+            self._log.exception(f"Failed to start agent '{self.name}': {exc}")
             self._running = False
             raise
 
@@ -62,8 +62,10 @@ class BaseAgent(ABC):
         if self._tasks:
             results = await asyncio.gather(*self._tasks, return_exceptions=True)
             for result in results:
-                if isinstance(result, Exception):
-                    self._log.error(f"Error while stopping task: {result}")
+                if isinstance(result, asyncio.CancelledError):
+                    self._log.info(f"Task cancelled: {result}")
+                elif isinstance(result, Exception):
+                    self._log.exception(f"Error while stopping task: {result}")
         self._tasks.clear()
         self._log.info(f"Agent '{self.name}' stopped.")
 
@@ -88,8 +90,8 @@ class BaseAgent(ABC):
             )
             await self._bus.publish(msg)
         except Exception as exc:
-            self._log.error(f"Failed to publish message to topic '{topic}': {exc}")
-            raise
+            self._log.exception(f"Failed to publish message to topic '{topic}': {exc}")
+            raise RuntimeError(f"Failed to publish message to topic '{topic}'") from exc
 
     # ------------------------------------------------------------------
     # LLM helper
@@ -106,7 +108,7 @@ class BaseAgent(ABC):
             tt = TaskType(task_type) if task_type in TaskType._value2member_map_ else TaskType.GENERAL
             return await model_router.query(prompt, system, history, task_type=tt)
         except Exception as exc:
-            self._log.error(f"llm_query failed: {exc}")
+            self._log.exception(f"llm_query failed: {exc}")
             return f"[LLM error: {exc}]"
 
     # ------------------------------------------------------------------
@@ -156,6 +158,9 @@ async def _ollama_query(prompt: str, system: str,
                 resp.raise_for_status()
                 data = await resp.json()
                 return data.get("message", {}).get("content", "")
+    except aiohttp.ClientResponseError as e:
+        log.error(f"Ollama query failed with HTTP error: {e.status} {e.message}")
+        raise
     except aiohttp.ClientError as e:
         log.error(f"Ollama query failed: {e}")
         raise
@@ -179,8 +184,14 @@ async def _openai_query(prompt: str, system: str,
             max_tokens=4096,
         )
         return resp.choices[0].message.content
-    except Exception as e:
+    except openai.error.AuthenticationError as e:
+        log.error(f"OpenAI authentication failed: {e}")
+        raise _AuthError("Authentication failed for OpenAI API.") from e
+    except openai.error.OpenAIError as e:
         log.error(f"OpenAI query failed: {e}")
+        raise
+    except Exception as e:
+        log.error(f"Unexpected error during OpenAI query: {e}")
         raise
 
 
@@ -201,8 +212,14 @@ async def _anthropic_query(prompt: str, system: str,
             messages=messages,
         )
         return resp.content[0].text
-    except Exception as e:
+    except anthropic.exceptions.AuthenticationError as e:
+        log.error(f"Anthropic authentication failed: {e}")
+        raise _AuthError("Authentication failed for Anthropic API.") from e
+    except anthropic.exceptions.AnthropicError as e:
         log.error(f"Anthropic query failed: {e}")
+        raise
+    except Exception as e:
+        log.error(f"Unexpected error during Anthropic query: {e}")
         raise
 
 
@@ -278,6 +295,9 @@ async def _copilot_query(prompt: str, system: str,
                 resp.raise_for_status()
                 data = await resp.json()
                 return data["choices"][0]["message"]["content"]
+    except aiohttp.ClientResponseError as e:
+        log.error(f"Copilot query failed with HTTP error: {e.status} {e.message}")
+        raise
     except aiohttp.ClientError as e:
         log.error(f"Copilot query failed: {e}")
         raise
