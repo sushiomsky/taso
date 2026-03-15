@@ -27,6 +27,9 @@ class PlannerAgent(BaseAgent):
         request = msg.payload.get("request")
         if not request:
             self._log.error("Received a planning request without a 'request' field.")
+            await self._send_error_response(
+                msg, "Missing 'request' field in the payload."
+            )
             return
 
         self._log.info(f"PlannerAgent: planning '{request[:80]}'")
@@ -36,10 +39,8 @@ class PlannerAgent(BaseAgent):
             plan = await task_planner.plan(request, context)
         except Exception as e:
             self._log.exception("Failed to generate plan.")
-            await self.publish(
-                topic=msg.reply_to or "coordinator.plan_failed",
-                payload={"error": str(e), "request": request},
-                recipient=msg.sender,
+            await self._send_error_response(
+                msg, f"Error generating plan: {str(e)}"
             )
             return
 
@@ -68,18 +69,38 @@ class PlannerAgent(BaseAgent):
     @staticmethod
     def _format_subtasks(subtasks: list) -> list:
         """Formats subtasks into a dictionary representation."""
-        return [
-            {
-                "id": t.id,
-                "description": t.description,
-                "capability": t.capability,
-                "depends_on": t.depends_on,
-                "priority": t.priority,
-            }
-            for t in subtasks
-        ]
+        try:
+            return [
+                {
+                    "id": t.id,
+                    "description": t.description,
+                    "capability": t.capability,
+                    "depends_on": t.depends_on,
+                    "priority": t.priority,
+                }
+                for t in subtasks
+            ]
+        except AttributeError as e:
+            log.exception("Error formatting subtasks: Invalid subtask structure.")
+            raise ValueError("Invalid subtask structure.") from e
 
     @staticmethod
     def _format_plan_for_display(subtasks: list) -> str:
         """Formats the plan for display as a string."""
-        return "\n".join(f"- [{t.id}] {t.description}" for t in subtasks)
+        try:
+            return "\n".join(f"- [{t.id}] {t.description}" for t in subtasks)
+        except AttributeError as e:
+            log.exception("Error formatting plan for display: Invalid subtask structure.")
+            return "Error: Invalid subtask structure."
+
+    async def _send_error_response(self, msg: BusMessage, error_message: str) -> None:
+        """Sends an error response back to the sender."""
+        try:
+            await self.publish(
+                topic=msg.reply_to or "coordinator.plan_failed",
+                payload={"error": error_message, "request": msg.payload.get("request")},
+                recipient=msg.sender,
+            )
+        except Exception as e:
+            self._log.exception("Failed to send error response.")
+            # Log the error but do not re-raise to avoid crashing the agent.
