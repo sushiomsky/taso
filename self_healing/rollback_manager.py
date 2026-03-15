@@ -40,40 +40,53 @@ class RollbackManager:
         return None
 
     def reset_errors(self) -> None:
+        """
+        Reset the error count to zero.
+        """
         self._error_count = 0
 
     async def rollback(self, reason: str = "manual rollback",
-                       target_sha: str = None) -> Optional[str]:
+                       target_sha: Optional[str] = None) -> Optional[str]:
         """
         Revert to target SHA or last stable version.
         Returns the SHA rolled back to, or None on failure.
         """
-        if target_sha is None:
-            target_sha = self._get_last_stable_sha()
-            if not target_sha:
-                log.error("RollbackManager: no stable version to roll back to.")
-                return None
+        target_sha = target_sha or self._get_last_stable_sha()
+        if not target_sha:
+            log.error("RollbackManager: no stable version to roll back to.")
+            return None
 
         return await self._trigger_rollback(reason=reason, target_sha=target_sha)
 
     def rollback_history(self) -> List[dict]:
+        """
+        Retrieve the last 10 rollback attempts.
+        """
         return self._rollback_log[-10:]
 
     def _is_debounce_active(self) -> bool:
         """
         Check if rollback debounce is active based on the last rollback time.
         """
-        return time.time() - self._last_rollback_time < self._debounce_interval
+        time_since_last_rollback = time.time() - self._last_rollback_time
+        is_active = time_since_last_rollback < self._debounce_interval
+        if is_active:
+            log.debug(f"RollbackManager: debounce active, {self._debounce_interval - time_since_last_rollback:.2f}s remaining.")
+        return is_active
 
     def _get_last_stable_sha(self) -> Optional[str]:
         """
         Retrieve the last stable commit SHA from the version manager.
         """
-        last_stable = version_manager.last_stable()
-        if not last_stable or not last_stable.commit_sha:
-            log.error("RollbackManager: no stable version available.")
+        try:
+            last_stable = version_manager.last_stable()
+            if not last_stable or not last_stable.commit_sha:
+                log.error("RollbackManager: no stable version available.")
+                return None
+            return last_stable.commit_sha
+        except Exception as e:
+            log.error(f"RollbackManager: failed to retrieve last stable SHA due to exception: {e}")
             return None
-        return last_stable.commit_sha
 
     async def _trigger_rollback(self, reason: str, target_sha: str) -> Optional[str]:
         """
@@ -93,20 +106,21 @@ class RollbackManager:
         """
         Record the details of a rollback attempt.
         """
+        timestamp = time.time()
         entry = {
-            "time": time.time(),
+            "time": timestamp,
             "reason": reason,
             "target_sha": target_sha,
             "success": success,
         }
         self._rollback_log.append(entry)
-        self._last_rollback_time = time.time()
+        self._last_rollback_time = timestamp
         self._error_count = 0
 
         if success:
-            log.info(f"RollbackManager: rollback to {target_sha} succeeded.")
+            log.info(f"RollbackManager: rollback to {target_sha} succeeded at {time.ctime(timestamp)}.")
         else:
-            log.error(f"RollbackManager: rollback to {target_sha} FAILED.")
+            log.error(f"RollbackManager: rollback to {target_sha} FAILED at {time.ctime(timestamp)}.")
 
 
 rollback_manager = RollbackManager()
