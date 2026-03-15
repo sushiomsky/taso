@@ -45,6 +45,9 @@ class DeveloperAgent(BaseAgent):
             task = msg.payload.get("task", "")
             context = msg.payload.get("context", "")
 
+            if not task:
+                raise ValueError("Task description is missing in the payload.")
+
             if action == "generate_tool":
                 result = await self._generate_tool(task)
             elif action == "generate_patch":
@@ -58,12 +61,20 @@ class DeveloperAgent(BaseAgent):
                     payload={"result": result, "agent": self.name, "action": action},
                     recipient=msg.sender,
                 )
-        except Exception as exc:
-            log.error(f"Error handling developer request: {exc}")
+        except ValueError as ve:
+            log.warning(f"Validation error: {ve}")
             if msg.reply_to:
                 await self.publish(
                     topic=msg.reply_to,
-                    payload={"error": str(exc), "agent": self.name, "action": "error"},
+                    payload={"error": str(ve), "agent": self.name, "action": "error"},
+                    recipient=msg.sender,
+                )
+        except Exception as exc:
+            log.exception("Unexpected error occurred while handling developer request.")
+            if msg.reply_to:
+                await self.publish(
+                    topic=msg.reply_to,
+                    payload={"error": "An unexpected error occurred. Please try again later.", "agent": self.name, "action": "error"},
                     recipient=msg.sender,
                 )
 
@@ -115,6 +126,7 @@ class DeveloperAgent(BaseAgent):
                         f"Test output: {output[:200]}"
                     )
                 else:
+                    log.error(f"Tool registration failed for '{tool.name}'.")
                     return f"❌ Tool '{tool.name}' generated but registration failed."
             else:
                 await version_history_db.log_tool(
@@ -130,12 +142,14 @@ class DeveloperAgent(BaseAgent):
                     f"Error: {output[:300]}"
                 )
         except Exception as exc:
-            log.error(f"DeveloperAgent: tool generation failed: {exc}")
+            log.exception("Tool generation failed.")
             return f"❌ Tool generation failed: {exc}"
 
     async def _generate_patch(self, task: str, context: str) -> str:
         """Generate a code patch and return the unified diff."""
         try:
+            if not task:
+                raise ValueError("Task description for patch generation is missing.")
             prompt = task
             if context:
                 prompt = f"Existing code:\n```python\n{context}\n```\n\nRequested change: {task}"
@@ -144,13 +158,18 @@ class DeveloperAgent(BaseAgent):
                 system=_PATCH_SYSTEM,
                 task_type=TaskType.CODING,
             )
+        except ValueError as ve:
+            log.warning(f"Validation error: {ve}")
+            return f"❌ Patch generation failed: {ve}"
         except Exception as exc:
-            log.error(f"DeveloperAgent: patch generation failed: {exc}")
+            log.exception("Patch generation failed.")
             return f"❌ Patch generation failed: {exc}"
 
     async def handle(self, description: str, context: str = "") -> str:
         """Handle a generic development task."""
         try:
+            if not description:
+                raise ValueError("Task description is missing.")
             prompt = description
             if context:
                 prompt = f"Context:\n{context}\n\nTask: {description}"
@@ -159,6 +178,9 @@ class DeveloperAgent(BaseAgent):
                 system=_DEV_SYSTEM,
                 task_type=TaskType.CODING,
             )
+        except ValueError as ve:
+            log.warning(f"Validation error: {ve}")
+            return f"❌ Task handling failed: {ve}"
         except Exception as exc:
-            log.error(f"DeveloperAgent: task handling failed: {exc}")
+            log.exception("Task handling failed.")
             return f"❌ Task handling failed: {exc}"
