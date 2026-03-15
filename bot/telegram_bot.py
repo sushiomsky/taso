@@ -214,6 +214,18 @@ class TelegramBot:
         app.add_handler(CommandHandler("dev_health",     self._cmd_dev_health))
         app.add_handler(CommandHandler("dev_lifecycle",  self._cmd_dev_lifecycle))
         app.add_handler(CommandHandler("dev_branches",   self._cmd_dev_branches))
+        # Personalisation commands
+        app.add_handler(CommandHandler("profile",     self._cmd_profile))
+        app.add_handler(CommandHandler("plugins",     self._cmd_plugins))
+        app.add_handler(CommandHandler("activate",    self._cmd_activate))
+        app.add_handler(CommandHandler("deactivate",  self._cmd_deactivate))
+        # Crawler commands
+        app.add_handler(CommandHandler("crawl_start",  self._cmd_crawl_start))
+        app.add_handler(CommandHandler("crawl_stop",   self._cmd_crawl_stop))
+        app.add_handler(CommandHandler("crawl_status", self._cmd_crawl_status))
+        app.add_handler(CommandHandler("crawl_add",    self._cmd_crawl_add))
+        app.add_handler(CommandHandler("crawl_search", self._cmd_crawl_search))
+        app.add_handler(CommandHandler("crawl_onions", self._cmd_crawl_onions))
 
         # Inline keyboard callbacks
         app.add_handler(CallbackQueryHandler(self._callback_query))
@@ -947,8 +959,12 @@ class TelegramBot:
         if not await self._guard(update, ctx):
             return
 
-        chat_id = update.effective_chat.id
-        text    = (update.message.text or "").strip()
+        chat_id    = update.effective_chat.id
+        user       = update.effective_user
+        text       = (update.message.text or "").strip()
+        username   = user.username or "" if user else ""
+        first_name = user.first_name or "" if user else ""
+
         if not text:
             return
 
@@ -974,8 +990,41 @@ class TelegramBot:
         # Show typing while classifying (user gets immediate feedback)
         await self._send_typing(update)
 
-        # --- Classify intent ---
-        classification = await self._classify_intent(text, history)
+        # --- Personalised fast-path: check user shortcuts + plugin patterns FIRST ---
+        classification = None
+        try:
+            from personalization.personalization_engine import personalization_engine as _pe
+            # Load profile to get shortcuts/plugins for pre-classification routing
+            from memory.user_profile_store import user_profile_store as _ups
+            _profile = await _ups.get_or_create(chat_id, username, first_name)
+            _extra = (
+                _pe._plugin_manager.build_shortcut_fast_paths(_profile.learned_shortcuts)
+                + _pe._plugin_manager.build_fast_patterns(_profile.active_plugins)
+            )
+            import re as _re
+            _lower = text.lower().strip()
+            for _pattern, _intent, _arg in _extra:
+                _m = _re.match(_pattern, _lower)
+                if _m:
+                    _a = _arg or (text if not _arg else "")
+                    # Try named group 'arg' or group 2
+                    try:
+                        _a = _m.group("arg") or _a
+                    except IndexError:
+                        try:
+                            _a = _m.group(2) or _a
+                        except IndexError:
+                            pass
+                    classification = {"intent": _intent, "arg": _a,
+                                      "confidence": 0.99, "fast_path": True}
+                    break
+        except Exception as _exc:
+            log.debug(f"Personalised fast-path error (non-fatal): {_exc}")
+
+        # --- Global intent classification (if no personalised match) ---
+        if classification is None:
+            classification = await self._classify_intent(text, history)
+
         intent     = classification.get("intent", "chat")
         arg        = classification.get("arg", text)
         confidence = float(classification.get("confidence", 0.5))
@@ -985,6 +1034,21 @@ class TelegramBot:
             f"NLP intent={intent!r} confidence={confidence:.2f} "
             f"fast={fast} arg={str(arg)[:60]!r}"
         )
+
+        # --- Behaviour tracking + personalisation context ---
+        pctx = None
+        try:
+            from personalization.personalization_engine import personalization_engine as _pe
+            pctx = await _pe.process(
+                user_id=chat_id,
+                username=username,
+                first_name=first_name,
+                intent=intent,
+                raw_text=text,
+                confidence=confidence,
+            )
+        except Exception as _exc:
+            log.debug(f"Personalisation engine error (non-fatal): {_exc}")
 
         # --- Low confidence → ask for clarification ---
         if intent != "chat" and confidence < self._CONFIDENCE_THRESHOLD:
@@ -1005,6 +1069,12 @@ class TelegramBot:
         # Keep typing indicator alive for slow operations
         await self._send_typing(update)
 
+        # --- Build personalised system-prompt hints for _nlp_chat ---
+        if pctx:
+            ctx.user_data["_persona_hints"] = pctx.response_hints
+        else:
+            ctx.user_data.pop("_persona_hints", None)
+
         # --- Dispatch to intent handler ---
         handler_name = self._INTENT_MAP.get(intent, "_nlp_chat")
         handler = getattr(self, handler_name, self._nlp_chat)
@@ -1013,6 +1083,11 @@ class TelegramBot:
         if response:
             await self._conv.add_message(chat_id, "assistant", response[:800])
             await self._reply_long(update, response)
+
+        # --- Send personalisation notifications (plugin unlocks, style changes) ---
+        if pctx and pctx.notifications:
+            for note in pctx.notifications:
+                await update.message.reply_text(note, parse_mode=ParseMode.MARKDOWN)
 
     # ------------------------------------------------------------------
     # NLP intent handlers — thin wrappers that reuse existing logic
@@ -1162,8 +1237,13 @@ class TelegramBot:
             "describe what they want in plain English — you will route automatically.\n"
             "Format responses with markdown where it aids readability."
         )
+        # Inject personalisation hints to adapt tone/style/focus
+        hints = ctx.user_data.get("_persona_hints", [])
+        if hints:
+            system += "\n\n" + "\n".join(hints)
+
         response = await self._coordinator.llm_query(
-            arg or update.message.text or "",
+            arg or (update.message.text if update.message else "") or "",
             system=system,
             history=history,
         )
@@ -1829,4 +1909,260 @@ class TelegramBot:
             )
         except Exception as exc:
             log.exception("dev_branches error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    # ------------------------------------------------------------------
+    # Personalisation commands
+    # ------------------------------------------------------------------
+
+    async def _cmd_profile(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show this user's personalised profile."""
+        if not await self._guard(update, ctx):
+            return
+        user    = update.effective_user
+        chat_id = update.effective_chat.id
+        try:
+            from personalization.personalization_engine import personalization_engine as pe
+            summary = await pe.get_profile_summary(chat_id)
+            await self._reply_long(update, summary, parse_mode=ParseMode.MARKDOWN)
+        except Exception as exc:
+            log.exception("profile error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _cmd_plugins(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """List available plugins and show which are active for this user."""
+        if not await self._guard(update, ctx):
+            return
+        chat_id = update.effective_chat.id
+        try:
+            from personalization.personalization_engine import personalization_engine as pe
+            msg = await pe.list_plugins_message(chat_id)
+            await self._reply_long(update, msg, parse_mode=ParseMode.MARKDOWN)
+        except Exception as exc:
+            log.exception("plugins error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _cmd_activate(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Activate a plugin: /activate <plugin_id>"""
+        if not await self._guard(update, ctx):
+            return
+        chat_id = update.effective_chat.id
+        args    = ctx.args or []
+        if not args:
+            await update.message.reply_text(
+                "Usage: `/activate <plugin_id>`\nUse /plugins to see available plugins.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        plugin_id = args[0].lower()
+        try:
+            from personalization.personalization_engine import personalization_engine as pe
+            ok, msg = await pe.activate_plugin(chat_id, plugin_id)
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        except Exception as exc:
+            log.exception("activate error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _cmd_deactivate(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Deactivate a plugin: /deactivate <plugin_id>"""
+        if not await self._guard(update, ctx):
+            return
+        chat_id = update.effective_chat.id
+        args    = ctx.args or []
+        if not args:
+            await update.message.reply_text(
+                "Usage: `/deactivate <plugin_id>`\nUse /plugins to see active plugins.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        plugin_id = args[0].lower()
+        try:
+            from personalization.personalization_engine import personalization_engine as pe
+            ok, msg = await pe.deactivate_plugin(chat_id, plugin_id)
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        except Exception as exc:
+            log.exception("deactivate error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    # ------------------------------------------------------------------
+    # Crawler commands
+    # ------------------------------------------------------------------
+
+    async def _cmd_crawl_start(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Start all crawlers: /crawl_start [onion|clearnet|irc|news|all]"""
+        if not await self._guard(update, ctx, admin_required=True):
+            return
+        await self._send_typing(update)
+        arg = (ctx.args[0] if ctx.args else "all").lower()
+        try:
+            from crawler.crawler_manager import crawler_manager
+            msgs = []
+            if arg in ("all", "onion"):
+                msgs.append(await crawler_manager.start_onion())
+            if arg in ("all", "clearnet"):
+                msgs.append(await crawler_manager.start_clearnet())
+            if arg in ("all", "irc"):
+                msgs.append(await crawler_manager.start_irc())
+            if arg in ("all", "news", "newsgroup"):
+                msgs.append(await crawler_manager.start_newsgroup())
+            if not msgs:
+                msgs = ["❓ Unknown target. Use: all | onion | clearnet | irc | news"]
+            await update.message.reply_text("\n".join(msgs))
+        except Exception as exc:
+            log.exception("crawl_start error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _cmd_crawl_stop(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Stop all crawlers: /crawl_stop [onion|clearnet|irc|news|all]"""
+        if not await self._guard(update, ctx, admin_required=True):
+            return
+        arg = (ctx.args[0] if ctx.args else "all").lower()
+        try:
+            from crawler.crawler_manager import crawler_manager
+            msgs = []
+            if arg in ("all", "onion"):
+                msgs.append(await crawler_manager.stop_onion())
+            if arg in ("all", "clearnet"):
+                msgs.append(await crawler_manager.stop_clearnet())
+            if arg in ("all", "irc"):
+                msgs.append(await crawler_manager.stop_irc())
+            if arg in ("all", "news", "newsgroup"):
+                msgs.append(await crawler_manager.stop_newsgroup())
+            await update.message.reply_text("\n".join(msgs or ["Done."]))
+        except Exception as exc:
+            log.exception("crawl_stop error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _cmd_crawl_status(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show crawler status and DB counts: /crawl_status"""
+        if not await self._guard(update, ctx):
+            return
+        await self._send_typing(update)
+        try:
+            from crawler.crawler_manager import crawler_manager
+            st  = await crawler_manager.status()
+            msg = crawler_manager.format_status(st)
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        except Exception as exc:
+            log.exception("crawl_status error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _cmd_crawl_add(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Add a URL to the crawl queue: /crawl_add <url>"""
+        if not await self._guard(update, ctx, admin_required=True):
+            return
+        if not ctx.args:
+            await update.message.reply_text(
+                "Usage: `/crawl_add <url>`\n\n"
+                "Examples:\n"
+                "  `/crawl_add https://krebsonsecurity.com`\n"
+                "  `/crawl_add http://dread...onion/`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        url = ctx.args[0]
+        try:
+            from crawler.crawler_manager import crawler_manager
+            msg = await crawler_manager.add_url(url)
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        except Exception as exc:
+            log.exception("crawl_add error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _cmd_crawl_search(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Search indexed content: /crawl_search <query>"""
+        if not await self._guard(update, ctx):
+            return
+        if not ctx.args:
+            await update.message.reply_text(
+                "Usage: `/crawl_search <query>`\n"
+                "Searches across crawled pages, IRC logs, and newsgroups.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        query = " ".join(ctx.args)
+        await self._send_typing(update)
+        try:
+            from crawler.crawler_manager import crawler_manager
+            results = await crawler_manager.search(query, limit=8)
+            if not results:
+                await update.message.reply_text(f"🔍 No results for `{query}`.",
+                                                parse_mode=ParseMode.MARKDOWN)
+                return
+            lines = [f"🔍 *Results for* `{query}` *({len(results)})*\n"]
+            for r in results:
+                rtype = r.get("type", "page")
+                snip  = r.get("snippet", "")[:200]
+                if rtype == "page":
+                    title = r.get("title") or r.get("url", "")[:60]
+                    src   = r.get("source_type", "")
+                    icon  = "🧅" if src == "onion" else "🌐"
+                    lines.append(f"{icon} *{title}*\n`{r.get('url','')[:80]}`\n_{snip}_")
+                elif rtype == "irc":
+                    lines.append(
+                        f"💬 [{r.get('network')}] {r.get('channel')} "
+                        f"<{r.get('nick')}>\n_{snip}_"
+                    )
+                elif rtype == "newsgroup":
+                    lines.append(
+                        f"📰 [{r.get('newsgroup')}] {r.get('subject','')[:60]}\n_{snip}_"
+                    )
+                lines.append("")
+            await self._reply_long(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        except Exception as exc:
+            log.exception("crawl_search error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _cmd_crawl_onions(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show discovered .onion addresses: /crawl_onions [alive|dead|unknown] [offset]"""
+        if not await self._guard(update, ctx):
+            return
+        await self._send_typing(update)
+        args   = ctx.args or []
+        status = args[0] if args and args[0] in ("alive", "dead", "timeout", "unknown") else None
+        offset = int(args[-1]) if args and args[-1].isdigit() else 0
+
+        try:
+            from crawler.crawler_manager import crawler_manager
+            onions = await crawler_manager.get_onions(status=status, limit=20)
+            total  = (await crawler_manager._db.count_onions())
+            if not onions:
+                await update.message.reply_text("🧅 No onion addresses found yet.")
+                return
+            label = f" ({status})" if status else ""
+            lines = [f"🧅 *Onion Addresses{label}* — total: {total}\n"]
+            for o in onions:
+                title  = o.get("title") or ""
+                seen   = int(o.get("times_seen", 1))
+                st     = o.get("status", "?")
+                icon   = {"alive": "✅", "dead": "💀", "timeout": "⏱️"}.get(st, "❓")
+                lines.append(
+                    f"{icon} `{o['address']}`"
+                    + (f"\n   _{title[:60]}_" if title else "")
+                    + f"\n   seen: {seen}×"
+                )
+            lines.append(f"\n_Showing {len(onions)} of {total}. Use /crawl\\_onions alive/dead/unknown_")
+            await self._reply_long(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        except Exception as exc:
+            log.exception("crawl_onions error")
             await update.message.reply_text(f"❌ {exc}")

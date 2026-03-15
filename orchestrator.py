@@ -76,6 +76,7 @@ class Orchestrator:
         from memory.knowledge_db import KnowledgeDB
         from memory.vector_store import VectorStore
         from memory.conversation_store import ConversationStore
+        from memory.user_profile_store import user_profile_store
 
         db = KnowledgeDB()
         vector = VectorStore()
@@ -83,6 +84,7 @@ class Orchestrator:
 
         await db.connect()
         await conv_store.connect()
+        await user_profile_store.connect()
         vector.load()
         log.info("Memory subsystem ready.")
         return db, vector, conv_store
@@ -162,6 +164,14 @@ class Orchestrator:
             log.info("Self-healing: bootstrap complete.")
         except Exception as exc:
             log.warning(f"Self-healing bootstrap error (non-fatal): {exc}", exc_info=True)
+
+        # Start crawler subsystem (non-fatal if deps missing)
+        try:
+            from crawler.crawler_manager import crawler_manager
+            await crawler_manager.connect()
+            log.info("Crawler DB connected — crawlers ready (use /crawl_start to activate).")
+        except Exception as exc:
+            log.warning(f"Crawler init error (non-fatal): {exc}", exc_info=True)
 
     async def _start_telegram_bot(self, bus, agents, tool_registry, conv_store):
         """Start the Telegram bot."""
