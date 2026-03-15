@@ -55,13 +55,17 @@ class VersionManager:
                 kwargs["version_id"] = make_version_id()
             rec = VersionRecord(**kwargs)
             self._records[rec.version_id] = rec
-            log.info(f"VersionManager: recorded {rec.version_id} ({rec.change_type} by {rec.author_agent})")
+            log.info(f"VersionManager: recorded version {rec.version_id} ({rec.change_type} by {rec.author_agent})")
             return rec
+        except TypeError as e:
+            log.error(f"Invalid arguments provided for version record creation: {e}")
+            raise ValueError("Invalid arguments provided for version record creation.") from e
         except Exception as e:
-            log.error(f"Failed to record version: {e}")
-            raise ValueError("Error creating version record. Please check the input parameters.")
+            log.error(f"Unexpected error while recording version: {e}")
+            raise ValueError("Unexpected error occurred while creating version record.") from e
 
-    def mark_stable(self, version_id: str, commit_sha: str = None) -> None:
+    def mark_stable(self, version_id: str, commit_sha: Optional[str] = None) -> None:
+        """Mark a version as stable and optionally update its commit SHA."""
         try:
             rec = self._records.get(version_id)
             if not rec:
@@ -73,39 +77,54 @@ class VersionManager:
                 rec.commit_sha = commit_sha
             if version_id not in self._stable_stack:
                 self._stable_stack.append(version_id)
-            log.info(f"VersionManager: {version_id} marked stable.")
+            log.info(f"VersionManager: {version_id} marked as stable.")
+        except ValueError as e:
+            log.error(f"Error marking version {version_id} as stable: {e}")
+            raise
         except Exception as e:
-            log.error(f"Failed to mark version {version_id} as stable: {e}")
-            raise ValueError(f"Error marking version {version_id} as stable.")
+            log.error(f"Unexpected error while marking version {version_id} as stable: {e}")
+            raise ValueError(f"Unexpected error occurred while marking version {version_id} as stable.") from e
 
     def last_stable(self) -> Optional[VersionRecord]:
-        if not self._stable_stack:
-            log.warning("VersionManager: No stable versions available.")
+        """Retrieve the most recent stable version record."""
+        try:
+            if not self._stable_stack:
+                log.warning("VersionManager: No stable versions available.")
+                return None
+            return self._records.get(self._stable_stack[-1])
+        except Exception as e:
+            log.error(f"Unexpected error while retrieving last stable version: {e}")
             return None
-        return self._records.get(self._stable_stack[-1])
 
     def prev_stable(self) -> Optional[VersionRecord]:
-        if len(self._stable_stack) < 2:
-            log.warning("VersionManager: No previous stable version available.")
+        """Retrieve the second most recent stable version record."""
+        try:
+            if len(self._stable_stack) < 2:
+                log.warning("VersionManager: No previous stable version available.")
+                return None
+            return self._records.get(self._stable_stack[-2])
+        except Exception as e:
+            log.error(f"Unexpected error while retrieving previous stable version: {e}")
             return None
-        return self._records.get(self._stable_stack[-2])
 
     def all_records(self, limit: int = 20) -> List[VersionRecord]:
+        """Retrieve all version records, sorted by timestamp in descending order."""
         try:
-            recs = sorted(self._records.values(), key=lambda r: r.timestamp, reverse=True)
-            return recs[:limit]
+            return sorted(self._records.values(), key=lambda r: r.timestamp, reverse=True)[:limit]
         except Exception as e:
             log.error(f"Failed to retrieve all records: {e}")
             return []
 
     def get(self, version_id: str) -> Optional[VersionRecord]:
+        """Retrieve a specific version record by its ID."""
         try:
             return self._records.get(version_id)
         except Exception as e:
-            log.error(f"Failed to retrieve version {version_id}: {e}")
+            log.error(f"Unexpected error while retrieving version {version_id}: {e}")
             return None
 
-    def status_dict(self) -> Dict:
+    def status_dict(self) -> Dict[str, Any]:
+        """Generate a dictionary summarizing the current version status."""
         try:
             last = self.last_stable()
             return {
