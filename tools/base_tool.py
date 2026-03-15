@@ -34,8 +34,14 @@ class ToolSchema:
         for name, spec in self.fields.items():
             if spec.get("required") and name not in inputs:
                 return f"Missing required field: '{name}'"
-            if name in inputs and not isinstance(inputs[name], eval(spec.get("type", "str"))):
-                return f"Invalid type for field: '{name}', expected {spec.get('type')}"
+            if name in inputs:
+                expected_type = spec.get("type", "str")
+                try:
+                    if not isinstance(inputs[name], eval(expected_type)):
+                        return f"Invalid type for field: '{name}', expected {expected_type}"
+                except Exception as exc:
+                    log.error(f"Error validating field '{name}': {exc}", exc_info=True)
+                    return f"Error validating field '{name}': {str(exc)}"
         return None
 
 
@@ -61,7 +67,11 @@ class BaseTool(ABC):
             return {"success": True, "result": result, "error": None}
         except Exception as exc:
             log.error(f"Tool '{self.name}' execution error: {exc}", exc_info=True)
-            return {"success": False, "result": None, "error": f"An error occurred: {str(exc)}"}
+            return {
+                "success": False,
+                "result": None,
+                "error": f"An error occurred during execution: {str(exc)}",
+            }
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> Any:
@@ -69,9 +79,9 @@ class BaseTool(ABC):
 
     def describe(self) -> Dict[str, Any]:
         return {
-            "name":        self.name,
+            "name": self.name,
             "description": self.description,
-            "schema":      self.schema.fields,
+            "schema": self.schema.fields,
         }
 
 
@@ -99,7 +109,10 @@ class ToolRegistry:
             try:
                 mod = importlib.import_module(f"tools.{module_info.name}")
             except Exception as exc:
-                log.warning(f"Could not import tools.{module_info.name}: {exc}", exc_info=True)
+                log.warning(
+                    f"Could not import tools.{module_info.name}: {exc}",
+                    exc_info=True,
+                )
                 continue
 
             for attr_name in dir(mod):
@@ -112,10 +125,18 @@ class ToolRegistry:
                 ):
                     try:
                         instance = obj()
+                        if instance.name in self._tools:
+                            log.warning(
+                                f"Duplicate tool name '{instance.name}' detected. Skipping registration."
+                            )
+                            continue
                         self._tools[instance.name] = instance
                         log.debug(f"Registered tool: {instance.name}")
                     except Exception as exc:
-                        log.error(f"Failed to instantiate tool '{obj.__name__}': {exc}", exc_info=True)
+                        log.error(
+                            f"Failed to instantiate tool '{obj.__name__}': {exc}",
+                            exc_info=True,
+                        )
 
         log.info(f"ToolRegistry: {len(self._tools)} tools loaded.")
 
@@ -131,9 +152,16 @@ class ToolRegistry:
     def __contains__(self, name: str) -> bool:
         return name in self._tools
 
-    def register_dynamic(self, name: str, code: str, description: str,
-                          input_schema: Dict = None, output_schema: Dict = None,
-                          tags: List[str] = None, version: str = "1.0.0") -> bool:
+    def register_dynamic(
+        self,
+        name: str,
+        code: str,
+        description: str,
+        input_schema: Dict = None,
+        output_schema: Dict = None,
+        tags: List[str] = None,
+        version: str = "1.0.0",
+    ) -> bool:
         """
         Register a dynamically generated tool from raw code string.
         The code must define run_tool(input_data: dict) -> dict.
@@ -141,6 +169,11 @@ class ToolRegistry:
         """
         import types
         import asyncio
+
+        if name in self._dynamic_tools:
+            log.warning(f"Dynamic tool '{name}' already registered.")
+            return False
+
         try:
             module = types.ModuleType(f"dynamic_tool_{name}")
             exec(compile(code, f"<dynamic:{name}>", "exec"), module.__dict__)
@@ -151,23 +184,27 @@ class ToolRegistry:
             if asyncio.iscoroutinefunction(raw_fn):
                 async_fn = raw_fn
             else:
+
                 async def async_fn(input_data, _fn=raw_fn):
                     return await asyncio.get_event_loop().run_in_executor(None, _fn, input_data)
 
-            async_fn.__name__       = f"run_tool_{name}"
-            async_fn.__doc__        = description
-            async_fn._dynamic       = True
-            async_fn._code          = code
-            async_fn._version       = version
-            async_fn._input_schema  = input_schema or {}
+            async_fn.__name__ = f"run_tool_{name}"
+            async_fn.__doc__ = description
+            async_fn._dynamic = True
+            async_fn._code = code
+            async_fn._version = version
+            async_fn._input_schema = input_schema or {}
             async_fn._output_schema = output_schema or {}
-            async_fn._tags          = tags or ["dynamic"]
+            async_fn._tags = tags or ["dynamic"]
 
             self._dynamic_tools[name] = async_fn
             log.info(f"ToolRegistry: dynamic tool '{name}' registered (v{version})")
             return True
         except Exception as exc:
-            log.error(f"ToolRegistry: failed to register dynamic tool '{name}': {exc}", exc_info=True)
+            log.error(
+                f"ToolRegistry: failed to register dynamic tool '{name}': {exc}",
+                exc_info=True,
+            )
             return False
 
     def get_dynamic(self, name: str):
