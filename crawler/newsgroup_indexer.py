@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import email
 import email.header
-import nntplib
 import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict
@@ -22,6 +21,14 @@ from crawler.seed_urls import NEWSGROUP_TARGETS, NNTP_SERVER, NNTP_PORT, NNTP_MA
 from crawler.text_extractor import extract_onions_from_text
 
 log = get_logger("newsgroup_indexer")
+
+try:
+    import nntplib
+    _NNTP = True
+except ImportError:
+    nntplib = None
+    _NNTP = False
+    log.warning("nntplib unavailable on this Python build; newsgroup indexing disabled.")
 
 FETCH_INTERVAL_HOURS = 6   # re-check newsgroups every 6 hours
 MAX_ARTICLES_PER_GROUP = 500
@@ -46,6 +53,9 @@ def _fetch_group(server: str, port: int, group: str, since_days: int) -> List[Di
     Returns list of article dicts: message_id, subject, author, body, posted_at.
     """
     articles = []
+    if not _NNTP:
+        return articles
+
     try:
         nntp = nntplib.NNTP(server, port, timeout=30)
         resp, count, first, last, name = nntp.group(group)
@@ -139,6 +149,10 @@ class NewsgroupIndexer:
         self._task:   Optional[asyncio.Task] = None
 
     async def start(self) -> None:
+        if not _NNTP:
+            log.error("NewsgroupIndexer disabled: nntplib is not available.")
+            self._running = False
+            return
         log.info(f"NewsgroupIndexer starting ({len(NEWSGROUP_TARGETS)} groups)…")
         self._running = True
         self._task    = asyncio.create_task(self._loop())
@@ -170,6 +184,9 @@ class NewsgroupIndexer:
             await asyncio.sleep(FETCH_INTERVAL_HOURS * 3600)
 
     async def _fetch_all(self) -> int:
+        if not _NNTP:
+            return 0
+
         total = 0
         loop  = asyncio.get_event_loop()
 

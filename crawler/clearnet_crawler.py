@@ -11,9 +11,10 @@ import asyncio
 import time
 from typing import Set, Optional
 from urllib.parse import urlparse
+from urllib import robotparser
 
 from config.logging_config import get_logger
-from crawler.crawler_db import CrawlerDB, SRC_CLEARNET, SRC_MANUAL
+from crawler.crawler_db import CrawlerDB, SRC_CLEARNET, SRC_MANUAL, SRC_ONION
 from crawler.text_extractor import extract, extract_onions_from_text
 from crawler.seed_urls import CLEARNET_SEEDS
 
@@ -31,6 +32,7 @@ RATE_LIMIT_SEC  = 2.0          # seconds between requests to same domain
 MAX_DEPTH       = 3
 BATCH_SIZE      = 10
 MAX_WORKERS     = 5
+ROBOTS_CACHE_TTL = 3600        # refresh robots.txt every 1 hour
 
 # Allowed domains — crawler stays within these (expanded as new URLs are manually added)
 # This prevents accidentally crawling half the internet.
@@ -59,6 +61,7 @@ class ClearnetCrawler:
         self._running  = False
         self._tasks: Set[asyncio.Task] = set()
         self._domain_ts: dict[str, float] = {}
+        self._robots_cache: dict[str, tuple[float, robotparser.RobotFileParser]] = {}
         self._allowed  = set(_ALLOWED_DOMAINS)
         self._lock     = asyncio.Lock()
 
@@ -152,6 +155,11 @@ class ClearnetCrawler:
             await self._db.mark_done(url, success=True)
             return
 
+        if not await self._is_allowed_by_robots(session, url):
+            log.debug(f"[clearnet] robots disallow: {url}")
+            await self._db.mark_done(url, success=True)
+            return
+
         await self._rate_limit(domain)
 
         try:
@@ -229,3 +237,47 @@ class ClearnetCrawler:
             self._domain_ts[domain] = time.time() + max(wait, 0)
         if wait > 0:
             await asyncio.sleep(wait)
+
+    async def _is_allowed_by_robots(
+        self,
+        session: "aiohttp.ClientSession",
+        url: str,
+    ) -> bool:
+        """Respect robots.txt for clearnet crawling with per-domain caching."""
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return False
+
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        now = time.time()
+
+        async with self._lock:
+            cached = self._robots_cache.get(base)
+
+        if cached and (now - cached[0]) < ROBOTS_CACHE_TTL:
+            try:
+                return cached[1].can_fetch(HEADERS["User-Agent"], url)
+            except Exception:
+                return True
+
+        rp = robotparser.RobotFileParser()
+        rp.set_url(f"{base}/robots.txt")
+
+        try:
+            async with session.get(f"{base}/robots.txt", allow_redirects=True, max_redirects=3) as resp:
+                if resp.status == 200:
+                    body = await resp.text(errors="replace")
+                    rp.parse(body.splitlines())
+                else:
+                    rp.parse([])
+        except Exception:
+            # If robots fetch fails, default to allow; keep crawler resilient.
+            rp.parse([])
+
+        async with self._lock:
+            self._robots_cache[base] = (now, rp)
+
+        try:
+            return rp.can_fetch(HEADERS["User-Agent"], url)
+        except Exception:
+            return True

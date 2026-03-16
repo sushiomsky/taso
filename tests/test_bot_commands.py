@@ -873,3 +873,82 @@ class TestReplyLong:
         update = _make_update()
         await bot._reply_long(update, "y" * 4000)
         assert update.message.reply_text.call_count == 1
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Crawler commands
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestCrawlerCommands:
+    @pytest.mark.asyncio
+    async def test_crawl_start_replies(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update()
+        mock_cm = MagicMock()
+        mock_cm.start_onion = AsyncMock(return_value="onion started")
+        mock_cm.start_clearnet = AsyncMock(return_value="clearnet started")
+        mock_cm.start_irc = AsyncMock(return_value="irc started")
+        mock_cm.start_newsgroup = AsyncMock(return_value="news started")
+
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH), \
+             patch("crawler.crawler_manager.crawler_manager", mock_cm):
+            await bot._cmd_crawl_start(update, _ctx(args=[]))
+        _assert_replied(update)
+
+    @pytest.mark.asyncio
+    async def test_crawl_status_replies(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update()
+        mock_cm = MagicMock()
+        mock_cm.status = AsyncMock(return_value={"crawlers": {}, "db": {"queue": {}}})
+        mock_cm.format_status = MagicMock(return_value="crawler status")
+
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH), \
+             patch("crawler.crawler_manager.crawler_manager", mock_cm):
+            await bot._cmd_crawl_status(update, _ctx())
+        _assert_replied(update)
+
+    @pytest.mark.asyncio
+    async def test_crawl_add_requires_url(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update()
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH):
+            await bot._cmd_crawl_add(update, _ctx(args=[]))
+        text = _replied(update)
+        assert "Usage" in text or "crawl_add" in text
+
+    @pytest.mark.asyncio
+    async def test_crawl_search_with_results(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update()
+        mock_cm = MagicMock()
+        mock_cm.search = AsyncMock(return_value=[
+            {
+                "type": "page",
+                "title": "Security Advisory",
+                "url": "https://example.com/advisory",
+                "source_type": "clearnet",
+                "snippet": "important security update",
+            }
+        ])
+
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH), \
+             patch("crawler.crawler_manager.crawler_manager", mock_cm):
+            await bot._cmd_crawl_search(update, _ctx(args=["security"]))
+        _assert_replied(update)
+
+    @pytest.mark.asyncio
+    async def test_crawl_onions_replies(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update()
+        mock_cm = MagicMock()
+        mock_cm.get_onions = AsyncMock(return_value=[
+            {"address": "exampleexample.onion", "title": "Forum", "times_seen": 2, "status": "alive"}
+        ])
+        mock_cm._db = MagicMock()
+        mock_cm._db.count_onions = AsyncMock(return_value=1)
+
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH), \
+             patch("crawler.crawler_manager.crawler_manager", mock_cm):
+            await bot._cmd_crawl_onions(update, _ctx(args=[]))
+        _assert_replied(update)
