@@ -407,6 +407,20 @@ class TestCmdRunSwarmTask:
             await bot._cmd_run_swarm_task(update, _ctx(args=["scan", "CVEs"]))
         _assert_replied(update)
 
+    @pytest.mark.asyncio
+    async def test_dispatch_error_does_not_fallback_to_direct_swarm(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update()
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH), \
+             patch.object(bot, "_dispatch_task", new_callable=AsyncMock, side_effect=RuntimeError("bus timeout")), \
+             patch("swarm.swarm_orchestrator.swarm_orchestrator") as mock_swarm:
+            mock_swarm.run = AsyncMock(return_value="should-not-run")
+            await bot._cmd_run_swarm_task(update, _ctx(args=["scan", "CVEs"]))
+
+        text = _replied(update)
+        assert "dispatch error" in text.lower()
+        mock_swarm.run.assert_not_called()
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # /model_router

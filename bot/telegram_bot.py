@@ -667,6 +667,12 @@ class TelegramBot:
 
         result_text = dispatched.get("result")
         task_id = dispatched.get("task_id")
+        dispatch_error = dispatched.get("error")
+
+        if dispatch_error:
+            await update.message.reply_text(f"❌ Swarm dispatch error: {dispatch_error}")
+            return
+
         if result_text is not None or task_id:
             if isinstance(result_text, (dict, list)):
                 result_text = json.dumps(result_text, indent=2)
