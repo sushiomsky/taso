@@ -141,8 +141,17 @@ class Orchestrator:
             DeveloperAgent, SelfHealingAgent, MonitoringAgent,
         ]
 
+        disabled_agents = {a.lower().strip() for a in settings.DISABLED_AGENTS}
         agents = []
         for agent_class in agent_classes:
+            agent_name = getattr(
+                agent_class,
+                "name",
+                agent_class.__name__.replace("Agent", "").lower(),
+            )
+            if agent_name.lower() in disabled_agents:
+                log.info(f"Agent disabled via config: {agent_name}")
+                continue
             try:
                 if agent_class == MemoryAgent:
                     agent = agent_class(bus, db, vector, conv_store)
@@ -159,8 +168,15 @@ class Orchestrator:
     async def _initialize_optional_features(self, agents, bus, db, conv_store):
         """Initialize optional features like self-improvement, swarm, and self-healing."""
         if settings.SELF_IMPROVE_ENABLED:
-            asyncio.create_task(self._self_improve_loop(agents[0], db))
-            log.info("Self-improvement loop scheduled.")
+            coordinator = next((a for a in agents if getattr(a, "name", "") == "coordinator"), None)
+            if coordinator is not None:
+                asyncio.create_task(self._self_improve_loop(coordinator, db))
+                log.info("Self-improvement loop scheduled.")
+            else:
+                log.warning(
+                    "SELF_IMPROVE_ENABLED=true but coordinator agent is unavailable; "
+                    "self-improvement loop not started."
+                )
 
         if settings.SWARM_ENABLED:
             try:
@@ -194,7 +210,7 @@ class Orchestrator:
 
         coordinator = next((a for a in agents if a.__class__.__name__ == "CoordinatorAgent"), None)
         if not coordinator:
-            raise RuntimeError("CoordinatorAgent not found among agents.")
+            raise RuntimeError("CoordinatorAgent not found among agents (check DISABLED_AGENTS).")
 
         bot = TelegramBot(
             bus=bus,

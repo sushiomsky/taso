@@ -108,6 +108,11 @@ class TelegramBot:
         BotCommand("add_feature", "Generate and register a new feature"),
         BotCommand("create_agent", "Autonomously generate and register a new agent"),
         BotCommand("create_tool", "Autonomously generate and register a new tool"),
+        BotCommand("config", "Show runtime config (features/models/agents)"),
+        BotCommand("feature", "Enable/disable a feature flag"),
+        BotCommand("agent_toggle", "Enable/disable a built-in agent"),
+        BotCommand("model", "Manage model backend/slots/enabled state"),
+        BotCommand("config_apply", "Apply config by restarting TASO service"),
     ]
 
     def __init__(
@@ -209,6 +214,11 @@ class TelegramBot:
             "plugins": self._cmd_plugins,
             "activate": self._cmd_activate,
             "deactivate": self._cmd_deactivate,
+            "config": self._cmd_config,
+            "feature": self._cmd_feature,
+            "agent_toggle": self._cmd_agent_toggle,
+            "model": self._cmd_model,
+            "config_apply": self._cmd_config_apply,
             "crawl_start": self._cmd_crawl_start,
             "crawl_stop": self._cmd_crawl_stop,
             "crawl_status": self._cmd_crawl_status,
@@ -2364,6 +2374,293 @@ class TelegramBot:
             await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
         except Exception as exc:
             log.exception("deactivate error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    # ------------------------------------------------------------------
+    # Runtime config commands
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_toggle_state(raw: str) -> Optional[bool]:
+        value = raw.strip().lower()
+        if value in {"on", "true", "1", "yes", "enable", "enabled"}:
+            return True
+        if value in {"off", "false", "0", "no", "disable", "disabled"}:
+            return False
+        return None
+
+    async def _cmd_config(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show runtime-editable config for features, agents, and models."""
+        if not await self._guard(update, ctx, admin_required=True):
+            return
+        try:
+            from config.runtime_config import runtime_config_manager as rcm
+
+            snap = rcm.snapshot()
+            features = snap["features"]
+            agents = snap["agents"]
+            models = snap["models"]
+
+            feature_lines = "\n".join(
+                f"  • `{name}`: {'✅ on' if enabled else '❌ off'}"
+                for name, enabled in sorted(features.items())
+            )
+            disabled_agents = agents.get("disabled", [])
+            disabled_agent_line = (
+                ", ".join(f"`{a}`" for a in disabled_agents) if disabled_agents else "_none_"
+            )
+
+            slots = models.get("slots", {})
+            slot_lines = "\n".join(
+                f"  • `{slot}` → `{value or 'unset'}`"
+                for slot, value in slots.items()
+            )
+            disabled_models = models.get("disabled", [])
+            disabled_model_line = (
+                ", ".join(f"`{m}`" for m in disabled_models) if disabled_models else "_none_"
+            )
+
+            msg = (
+                "⚙️ *TASO Runtime Configuration*\n\n"
+                f"*Features*\n{feature_lines}\n\n"
+                f"*Agents*\n"
+                f"  • disabled: {disabled_agent_line}\n\n"
+                f"*Models*\n"
+                f"  • backend: `{models.get('backend', 'unknown')}`\n"
+                f"{slot_lines}\n"
+                f"  • disabled: {disabled_model_line}\n\n"
+                "*Change commands*\n"
+                "• `/feature <name> <on|off>`\n"
+                "• `/agent_toggle <name> <on|off>`\n"
+                "• `/model show`\n"
+                "• `/model backend <ollama|openai|anthropic|copilot>`\n"
+                "• `/model slot <ollama|openai|anthropic|copilot|uncensored> <model>`\n"
+                "• `/model <enable|disable> <model_name>`\n"
+                "• `/config_apply` (restart service and apply changes)"
+            )
+            await self._reply_long(update, msg, parse_mode=ParseMode.MARKDOWN)
+        except Exception as exc:
+            log.exception("config command error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _cmd_feature(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Toggle runtime feature flags: /feature <name> <on|off>."""
+        if not await self._guard(update, ctx, admin_required=True):
+            return
+        try:
+            from config.runtime_config import runtime_config_manager as rcm
+
+            args = ctx.args or []
+            if len(args) < 2:
+                await update.message.reply_text(
+                    "Usage: `/feature <name> <on|off>`\n\n"
+                    f"Available: {', '.join(f'`{name}`' for name in rcm.feature_names())}",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            state = self._parse_toggle_state(args[1])
+            if state is None:
+                await update.message.reply_text(
+                    "Second argument must be `on` or `off`."
+                )
+                return
+
+            ok, detail = rcm.set_feature_enabled(args[0], state)
+            if not ok:
+                await update.message.reply_text(f"❌ {detail}")
+                return
+
+            await update.message.reply_text(
+                f"✅ Feature `{args[0]}` set to `{('on' if state else 'off')}` "
+                f"(`{detail}` updated in `.env`).\n"
+                "Run `/config_apply` to apply now.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as exc:
+            log.exception("feature command error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _cmd_agent_toggle(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Enable/disable built-in agents: /agent_toggle <agent> <on|off>."""
+        if not await self._guard(update, ctx, admin_required=True):
+            return
+        try:
+            from config.runtime_config import runtime_config_manager as rcm
+
+            args = ctx.args or []
+            if len(args) < 2:
+                await update.message.reply_text(
+                    "Usage: `/agent_toggle <agent> <on|off>`\n\n"
+                    f"Available: {', '.join(f'`{name}`' for name in rcm.BUILTIN_AGENTS)}",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            state = self._parse_toggle_state(args[1])
+            if state is None:
+                await update.message.reply_text(
+                    "Second argument must be `on` or `off`."
+                )
+                return
+
+            ok, detail = rcm.set_agent_enabled(args[0], state)
+            if not ok:
+                await update.message.reply_text(f"❌ {detail}")
+                return
+
+            await update.message.reply_text(
+                f"✅ Agent `{detail}` set to `{('enabled' if state else 'disabled')}` "
+                "in `.env`.\nRun `/config_apply` to apply now.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as exc:
+            log.exception("agent_toggle command error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _cmd_model(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """
+        Manage model runtime config.
+
+        /model show
+        /model backend <ollama|openai|anthropic|copilot>
+        /model slot <ollama|openai|anthropic|copilot|uncensored> <model_name>
+        /model <enable|disable> <model_name>
+        """
+        if not await self._guard(update, ctx, admin_required=True):
+            return
+        try:
+            from config.runtime_config import runtime_config_manager as rcm
+
+            args = ctx.args or []
+            action = (args[0].lower() if args else "show")
+
+            if action in {"show", "status"}:
+                models = rcm.model_status()
+                slots = models.get("slots", {})
+                slot_lines = "\n".join(
+                    f"  • `{slot}` → `{value or 'unset'}`"
+                    for slot, value in slots.items()
+                )
+                disabled = models.get("disabled", [])
+                disabled_line = ", ".join(f"`{m}`" for m in disabled) if disabled else "_none_"
+                await update.message.reply_text(
+                    "🤖 *Model Runtime Config*\n\n"
+                    f"Backend: `{models.get('backend', 'unknown')}`\n"
+                    f"{slot_lines}\n"
+                    f"Disabled models: {disabled_line}\n\n"
+                    "Use `/model backend`, `/model slot`, or `/model enable|disable`.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            if action == "backend":
+                if len(args) < 2:
+                    await update.message.reply_text(
+                        "Usage: `/model backend <ollama|openai|anthropic|copilot>`",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                    return
+                ok, detail = rcm.set_backend(args[1])
+                if not ok:
+                    await update.message.reply_text(f"❌ {detail}")
+                    return
+                await update.message.reply_text(
+                    f"✅ LLM backend set to `{detail}` in `.env`.\n"
+                    "Run `/config_apply` to apply now.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            if action == "slot":
+                if len(args) < 3:
+                    await update.message.reply_text(
+                        "Usage: `/model slot <ollama|openai|anthropic|copilot|uncensored> <model_name>`",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                    return
+                slot = args[1]
+                model_name = " ".join(args[2:]).strip()
+                ok, detail = rcm.set_model_slot(slot, model_name)
+                if not ok:
+                    await update.message.reply_text(f"❌ {detail}")
+                    return
+                await update.message.reply_text(
+                    f"✅ Updated `{detail}` to `{model_name}` in `.env`.\n"
+                    "Run `/config_apply` to apply now.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            if action in {"enable", "disable"}:
+                if len(args) < 2:
+                    await update.message.reply_text(
+                        "Usage: `/model <enable|disable> <model_name>`",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                    return
+                model_name = " ".join(args[1:]).strip()
+                enabled = action == "enable"
+                ok, detail = rcm.set_model_enabled(model_name, enabled)
+                if not ok:
+                    await update.message.reply_text(f"❌ {detail}")
+                    return
+                await update.message.reply_text(
+                    f"✅ Model `{detail}` set to `{('enabled' if enabled else 'disabled')}` "
+                    "in `.env`.\nRun `/config_apply` to apply now.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            await update.message.reply_text(
+                "Unknown model action.\n"
+                "Use: `/model show`, `/model backend ...`, `/model slot ...`, "
+                "or `/model enable|disable ...`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as exc:
+            log.exception("model command error")
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _cmd_config_apply(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Apply config changes by restarting the TASO systemd service."""
+        if not await self._guard(update, ctx, admin_required=True):
+            return
+        try:
+            import subprocess
+            from shutil import which
+            from config.runtime_config import runtime_config_manager as rcm
+
+            service_name = rcm.systemd_service_name()
+            if which("systemctl") is None:
+                await update.message.reply_text(
+                    "⚠️ `systemctl` is not available in this environment.\n"
+                    f"Please restart manually and ensure `{service_name}` is running."
+                )
+                return
+
+            await update.message.reply_text(
+                f"♻️ Applying config by restarting `{service_name}`…\n"
+                "TASO should reconnect in a few seconds.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            subprocess.Popen(
+                ["systemctl", "restart", service_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            log.exception("config_apply command error")
             await update.message.reply_text(f"❌ {exc}")
 
     # ------------------------------------------------------------------

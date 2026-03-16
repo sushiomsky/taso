@@ -57,6 +57,7 @@ class ModelRegistry:
         try:
             self._load_defaults()
             self._apply_overrides()
+            self._apply_disabled_models()
             log.info(f"ModelRegistry initialized with {len(self._models)} models.")
         except Exception as exc:
             log.error(f"Failed to initialize ModelRegistry: {exc}", exc_info=True)
@@ -152,6 +153,16 @@ class ModelRegistry:
             log.error(f"Failed to parse MODEL_ROUTING_OVERRIDES JSON: {exc}", exc_info=True)
         except Exception as exc:
             log.error(f"Unexpected error while applying overrides: {exc}", exc_info=True)
+
+    def _apply_disabled_models(self) -> None:
+        """Mark models unavailable when listed in DISABLED_MODELS."""
+        disabled = {name.strip().lower() for name in settings.DISABLED_MODELS if name.strip()}
+        if not disabled:
+            return
+        for model in self._models.values():
+            if model.name.lower() in disabled:
+                model.available = False
+                log.info(f"Model '{model.name}' disabled via DISABLED_MODELS.")
 
     def get(self, name: str) -> Optional[ModelEntry]:
         try:

@@ -701,6 +701,77 @@ class TestCmdCreateTool:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Runtime config commands
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestCmdRuntimeConfig:
+    @pytest.mark.asyncio
+    async def test_config_show_replies(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update()
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH), \
+             patch("config.runtime_config.runtime_config_manager") as rcm:
+            rcm.snapshot.return_value = {
+                "features": {"swarm": True, "self_improve": False},
+                "agents": {"enabled": ["coordinator"], "disabled": ["research"]},
+                "models": {
+                    "backend": "ollama",
+                    "slots": {"ollama": "llama3"},
+                    "disabled": ["gpt-4o"],
+                },
+                "restart_service": "taso.service",
+            }
+            await bot._cmd_config(update, _ctx())
+        _assert_replied(update)
+
+    @pytest.mark.asyncio
+    async def test_feature_toggle_updates_env(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update()
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH), \
+             patch("config.runtime_config.runtime_config_manager") as rcm:
+            rcm.set_feature_enabled.return_value = (True, "SWARM_ENABLED")
+            await bot._cmd_feature(update, _ctx(args=["swarm", "off"]))
+        rcm.set_feature_enabled.assert_called_once_with("swarm", False)
+        _assert_replied(update)
+
+    @pytest.mark.asyncio
+    async def test_agent_toggle_usage(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update()
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH), \
+             patch("config.runtime_config.runtime_config_manager") as rcm:
+            rcm.BUILTIN_AGENTS = ["coordinator", "research"]
+            await bot._cmd_agent_toggle(update, _ctx(args=[]))
+        text = _replied(update)
+        assert "Usage" in text
+
+    @pytest.mark.asyncio
+    async def test_model_backend_set(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update()
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH), \
+             patch("config.runtime_config.runtime_config_manager") as rcm:
+            rcm.set_backend.return_value = (True, "ollama")
+            await bot._cmd_model(update, _ctx(args=["backend", "ollama"]))
+        rcm.set_backend.assert_called_once_with("ollama")
+        _assert_replied(update)
+
+    @pytest.mark.asyncio
+    async def test_config_apply_triggers_restart(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update()
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH), \
+             patch("config.runtime_config.runtime_config_manager") as rcm, \
+             patch("shutil.which", return_value="/usr/bin/systemctl"), \
+             patch("subprocess.Popen") as popen:
+            rcm.systemd_service_name.return_value = "taso.service"
+            await bot._cmd_config_apply(update, _ctx())
+        popen.assert_called_once()
+        _assert_replied(update)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # /create_agent
 # ──────────────────────────────────────────────────────────────────────────────
 

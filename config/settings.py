@@ -89,6 +89,8 @@ class Settings:
     # --- Model routing ------------------------------------------------------
     # JSON mapping of task_type → model_name (overrides defaults)
     MODEL_ROUTING_OVERRIDES: str = _env("MODEL_ROUTING_OVERRIDES", "")
+    # Runtime disable list for specific model names (comma-separated)
+    DISABLED_MODELS: List[str] = _env_list("DISABLED_MODELS", "")
 
     # --- Database --------------------------------------------------------
     DB_PATH: Path = BASE_DIR / _env("DB_PATH", "data/taso.db")
@@ -143,6 +145,12 @@ class Settings:
 
     # --- Agent bus -------------------------------------------------------
     BUS_MAX_QUEUE: int = _env_int("BUS_MAX_QUEUE", 1000)
+    # Runtime disable list for built-in agents by name (comma-separated)
+    DISABLED_AGENTS: List[str] = [
+        a.lower().strip() for a in _env_list("DISABLED_AGENTS", "")
+    ]
+    # Service name used for in-bot config apply/restart operation.
+    TASO_SYSTEMD_SERVICE: str = _env("TASO_SYSTEMD_SERVICE", "taso.service")
 
     # --- Misc ------------------------------------------------------------
     APP_ENV: str = _env("APP_ENV", "development")

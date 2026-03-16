@@ -30,6 +30,11 @@ Admin-only commands:
 - `/dev_health`
 - `/dev_lifecycle <description>`
 - `/dev_branches`
+- `/config`
+- `/feature <name> <on|off>`
+- `/agent_toggle <agent> <on|off>`
+- `/model <show|backend|slot|enable|disable> ...`
+- `/config_apply`
 - `/crawl_start [all|onion|clearnet|irc|news]`
 - `/crawl_stop [all|onion|clearnet|irc|news]`
 - `/crawl_add <url>`
