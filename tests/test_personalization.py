@@ -61,6 +61,31 @@ class TestUserProfileStore:
         profile = UserProfile(user_id="not-a-number")
         assert profile.user_id == 0
 
+    def test_user_profile_sanitizes_unexpected_decoded_json_types(self):
+        from memory.user_profile_store import UserProfile
+        profile = UserProfile(
+            active_plugins='{"unexpected":"object"}',
+            learned_shortcuts='["not-a-dict"]',
+            metadata='["not-a-dict"]',
+        )
+        assert profile.active_plugins == []
+        assert profile.learned_shortcuts == {}
+        assert profile.metadata == {}
+
+    def test_user_profile_sanitizes_invalid_container_types(self):
+        from memory.user_profile_store import UserProfile
+        profile = UserProfile(
+            active_plugins={"bad": "shape"},
+            learned_shortcuts=["bad", "shape"],
+            metadata=["bad", "shape"],
+        )
+        assert profile.active_plugins == []
+        assert profile.learned_shortcuts == {}
+        assert profile.metadata == {}
+
+        tuple_profile = UserProfile(active_plugins=("developer", "researcher"))
+        assert tuple_profile.active_plugins == ["developer", "researcher"]
+
     def test_save_and_reload(self):
         store = self._make_store()
         profile = run(store.get_or_create(42, "bob", "Bob"))

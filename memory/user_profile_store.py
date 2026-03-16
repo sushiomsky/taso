@@ -53,7 +53,11 @@ class UserProfile:
                 active_plugins = json.loads(active_plugins)
             except json.JSONDecodeError:
                 active_plugins = []
-        self.active_plugins: List[str] = list(active_plugins)
+        if isinstance(active_plugins, tuple):
+            active_plugins = list(active_plugins)
+        if not isinstance(active_plugins, list):
+            active_plugins = []
+        self.active_plugins: List[str] = [p for p in active_plugins if isinstance(p, str)]
         # User-specific shortcut phrases → intent mappings
         # e.g. {"check everything": "status", "my scanner": "security_scan"}
         learned_shortcuts = data.get("learned_shortcuts") or {}
@@ -62,7 +66,11 @@ class UserProfile:
                 learned_shortcuts = json.loads(learned_shortcuts)
             except json.JSONDecodeError:
                 learned_shortcuts = {}
-        self.learned_shortcuts: Dict[str, str] = dict(learned_shortcuts)
+        if not isinstance(learned_shortcuts, dict):
+            learned_shortcuts = {}
+        self.learned_shortcuts: Dict[str, str] = {
+            str(k): str(v) for k, v in learned_shortcuts.items()
+        }
         # Arbitrary metadata blob (power_user flag, onboarding_done, etc.)
         metadata = data.get("metadata") or {}
         if isinstance(metadata, str):
@@ -70,6 +78,8 @@ class UserProfile:
                 metadata = json.loads(metadata)
             except json.JSONDecodeError:
                 metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
         self.metadata: Dict[str, Any] = dict(metadata)
         self.created_at: str = data.get("created_at") or ""
         self.updated_at: str = data.get("updated_at") or ""
