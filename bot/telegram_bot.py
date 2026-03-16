@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -877,6 +878,115 @@ class TelegramBot:
     _CONFIDENCE_THRESHOLD = 0.60
     # Minimum confidence to show the intent label without asking first.
     _LABEL_THRESHOLD = 0.75
+    # For potentially destructive or expensive actions, bias to chat unless confidence is strong.
+    _ACTION_CHAT_PREFERENCE_THRESHOLD = 0.85
+
+    _ACTION_INTENTS = {
+        "create_tool", "create_agent", "add_feature",
+        "dev_tool", "dev_task", "dev_patch", "dev_deploy", "dev_rollback",
+        "update_self", "swarm_task",
+        "scan_repo", "security_scan", "code_audit", "learn_repo",
+    }
+
+    _ARG_REQUIRED_INTENTS = {
+        "create_tool", "create_agent", "add_feature",
+        "dev_tool", "dev_task", "dev_patch",
+        "swarm_task", "scan_repo", "security_scan", "threat_intel", "learn_repo",
+    }
+
+    _CALLBACK_PAYLOAD_TTL_SEC = 3600
+    _CALLBACK_PAYLOAD_LIMIT = 128
+
+    @staticmethod
+    def _looks_informational_question(text: str) -> bool:
+        lower = text.lower().strip()
+        if not lower:
+            return False
+        if lower.endswith("?"):
+            return True
+        prefixes = (
+            "what", "why", "how", "when", "where", "who", "which",
+            "can you", "could you", "would you", "do you", "does", "is", "are",
+            "should", "explain", "tell me",
+        )
+        return any(lower == p or lower.startswith(f"{p} ") for p in prefixes)
+
+    def _should_prefer_chat(
+        self, intent: str, text: str, confidence: float, fast_path: bool
+    ) -> bool:
+        if fast_path or intent == "chat":
+            return False
+        if intent not in self._ACTION_INTENTS:
+            return False
+        if confidence >= self._ACTION_CHAT_PREFERENCE_THRESHOLD:
+            return False
+        return self._looks_informational_question(text)
+
+    @staticmethod
+    def _missing_arg_prompt(intent: str) -> str:
+        prompts = {
+            "scan_repo": "🔍 Please provide a repository URL or local path to scan.",
+            "security_scan": "🛡️ Please provide a target (repo URL, path, host, or domain).",
+            "threat_intel": "🌐 Please provide a threat-intel topic, keyword, or CVE (e.g. `CVE-2024-12345`).",
+            "swarm_task": "🐝 Please describe the task you want the swarm to execute.",
+            "dev_task": "⚙️ Please describe the development task in one sentence.",
+            "dev_tool": "🛠️ Please describe the tool you want to generate.",
+            "dev_patch": "📝 Please describe the patch/change you want.",
+            "learn_repo": "📚 Please provide a GitHub repository URL to learn from.",
+            "add_feature": "✨ Please describe the feature you want to add.",
+            "create_agent": "🤖 Please describe the agent you want to create.",
+            "create_tool": "🔧 Please describe the tool you want to create.",
+        }
+        return prompts.get(
+            intent,
+            "Please provide a bit more detail so I can run that action.",
+        )
+
+    def _store_callback_payload(
+        self, ctx: ContextTypes.DEFAULT_TYPE, payload: Dict[str, Any]
+    ) -> str:
+        now = time.time()
+        pending = ctx.user_data.setdefault("_callback_payloads", {})
+        if not isinstance(pending, dict):
+            pending = {}
+            ctx.user_data["_callback_payloads"] = pending
+
+        stale = [
+            key
+            for key, value in pending.items()
+            if not isinstance(value, dict)
+            or (now - float(value.get("ts", now))) > self._CALLBACK_PAYLOAD_TTL_SEC
+        ]
+        for key in stale:
+            pending.pop(key, None)
+
+        token = uuid.uuid4().hex[:12]
+        pending[token] = {"payload": payload, "ts": now}
+
+        overflow = len(pending) - self._CALLBACK_PAYLOAD_LIMIT
+        if overflow > 0:
+            ordered = sorted(
+                pending.items(),
+                key=lambda item: float(item[1].get("ts", 0.0))
+                if isinstance(item[1], dict)
+                else 0.0,
+            )
+            for key, _ in ordered[:overflow]:
+                pending.pop(key, None)
+
+        return token
+
+    def _pop_callback_payload(
+        self, ctx: ContextTypes.DEFAULT_TYPE, token: str
+    ) -> Optional[Dict[str, Any]]:
+        pending = ctx.user_data.get("_callback_payloads")
+        if not isinstance(pending, dict):
+            return None
+        entry = pending.pop(token, None)
+        if not isinstance(entry, dict):
+            return None
+        payload = entry.get("payload")
+        return payload if isinstance(payload, dict) else None
 
     @staticmethod
     def _extract_json(raw: str) -> Optional[Dict]:
@@ -961,14 +1071,29 @@ class TelegramBot:
 
     async def _ask_clarification(
         self, update: Update, ctx: ContextTypes.DEFAULT_TYPE,
-        intent: str, arg: str, confidence: float,
+        intent: str, arg: str, confidence: float, original_text: str,
     ) -> None:
         """Ask the user to confirm a low-confidence intent via inline keyboard."""
         label = self._INTENT_LABELS.get(intent, intent.replace("_", " ").title())
+        token = self._store_callback_payload(
+            ctx,
+            {
+                "kind": "clarify",
+                "intent": intent,
+                "arg": arg,
+                "text": original_text,
+            },
+        )
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton(f"✅ Yes — {label}", callback_data=f"confirm:{intent}:{arg[:80]}"),
-                InlineKeyboardButton("❌ No, just chat", callback_data="confirm:chat:"),
+                InlineKeyboardButton(
+                    f"✅ Yes — {label}",
+                    callback_data=f"confirm_ref:{token}:yes",
+                ),
+                InlineKeyboardButton(
+                    "💬 No, just chat",
+                    callback_data=f"confirm_ref:{token}:chat",
+                ),
             ]
         ])
         await update.message.reply_text(
@@ -1056,6 +1181,14 @@ class TelegramBot:
         confidence = float(classification.get("confidence", 0.5))
         fast       = classification.get("fast_path", False)
 
+        if self._should_prefer_chat(intent, text, confidence, fast):
+            log.info(
+                f"NLP override: intent={intent!r} → 'chat' "
+                f"(question-like phrasing, confidence={confidence:.2f})"
+            )
+            intent = "chat"
+            arg = text
+
         log.info(
             f"NLP intent={intent!r} confidence={confidence:.2f} "
             f"fast={fast} arg={str(arg)[:60]!r}"
@@ -1078,7 +1211,15 @@ class TelegramBot:
 
         # --- Low confidence → ask for clarification ---
         if intent != "chat" and confidence < self._CONFIDENCE_THRESHOLD:
-            await self._ask_clarification(update, ctx, intent, arg, confidence)
+            await self._ask_clarification(update, ctx, intent, arg, confidence, text)
+            return
+
+        # --- High confidence but missing action argument ---
+        if intent in self._ARG_REQUIRED_INTENTS and not str(arg or "").strip():
+            await update.message.reply_text(
+                self._missing_arg_prompt(intent),
+                parse_mode=ParseMode.MARKDOWN,
+            )
             return
 
         # --- Show what the bot understood (for non-trivial actions) ---
@@ -1213,7 +1354,8 @@ class TelegramBot:
 
     async def _nlp_dev_tool(self, update, ctx, arg, history) -> Optional[str]:
         ctx.args = arg.split() if arg else []
-        await self._cmd_dev_tool(update, ctx)
+        # Route NLP-triggered tool creation through confirmation-gated flow.
+        await self._cmd_create_tool(update, ctx)
         return None
 
     async def _nlp_dev_patch(self, update, ctx, arg, history) -> Optional[str]:
@@ -1374,6 +1516,40 @@ class TelegramBot:
         await query.answer()
         data = query.data or ""
 
+        # Tokenized tool-generation confirmation (new flow)
+        if data.startswith("gentool_ref:"):
+            parts = data.split(":", 2)
+            token = parts[1] if len(parts) > 1 else ""
+            action = parts[2] if len(parts) > 2 else "cancel"
+            payload = self._pop_callback_payload(ctx, token)
+            if not payload or payload.get("kind") != "gentool":
+                await query.edit_message_text(
+                    "⚠️ This tool confirmation expired. Please run `/create_tool` again.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+            if action != "yes":
+                await query.edit_message_text("❌ Tool generation cancelled.")
+                return
+
+            description = str(payload.get("description", "")).strip()
+            await query.edit_message_text(
+                f"⚙️ Generating tool: _{description[:120]}_\n\n"
+                "Generating code → Testing in sandbox → Registering…",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            try:
+                result = await self._dispatch("developer.request", {
+                    "action": "generate_tool",
+                    "task": description,
+                })
+                text = result.get("result", result.get("error", "No response"))
+                await query.message.reply_text(text[:4000], parse_mode=ParseMode.MARKDOWN)
+            except Exception as exc:
+                log.exception("Tool generation callback error")
+                await query.message.reply_text(f"❌ Error during tool generation: {exc}")
+            return
+
         # Tool generation confirmation (from /create_tool or NLP create_tool)
         if data.startswith("gentool:"):
             description = data[len("gentool:"):]
@@ -1397,6 +1573,51 @@ class TelegramBot:
             except Exception as exc:
                 log.exception("Tool generation callback error")
                 await query.message.reply_text(f"❌ Error during tool generation: {exc}")
+            return
+
+        # Tokenized clarification confirmation (new flow)
+        if data.startswith("confirm_ref:"):
+            parts = data.split(":", 2)
+            token = parts[1] if len(parts) > 1 else ""
+            action = parts[2] if len(parts) > 2 else "chat"
+            payload = self._pop_callback_payload(ctx, token)
+            if not payload or payload.get("kind") != "clarify":
+                await query.edit_message_text(
+                    "⚠️ This clarification expired. Please send your request again."
+                )
+                return
+
+            intent = str(payload.get("intent", "chat"))
+            arg = str(payload.get("arg", ""))
+            source_text = str(payload.get("text", ""))
+
+            if action == "chat" or intent == "chat":
+                await query.edit_message_text("💬 Got it — treating this as a chat question.")
+                await self._send_typing(update)
+                history = await self._conv.get_context(query.message.chat_id)
+                response = await self._nlp_chat(update, ctx, source_text or arg, history)
+                if response:
+                    await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+                return
+
+            label = self._INTENT_LABELS.get(intent, intent.replace("_", " ").title())
+            await query.edit_message_text(f"{label}…")
+            await self._send_typing(update)
+
+            handler_name = self._INTENT_MAP.get(intent, "_nlp_chat")
+            handler = getattr(self, handler_name, self._nlp_chat)
+            history = await self._conv.get_context(query.message.chat_id)
+            response = await handler(update, ctx, arg, history)
+            if response:
+                await self._conv.add_message(query.message.chat_id, "assistant", response[:800])
+                if len(response) <= 4000:
+                    await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+                else:
+                    for i in range(0, len(response), 4000):
+                        await query.message.reply_text(
+                            response[i:i + 4000], parse_mode=ParseMode.MARKDOWN
+                        )
+                        await asyncio.sleep(0.2)
             return
 
         # Clarification confirmation from _ask_clarification()
@@ -1911,14 +2132,18 @@ class TelegramBot:
 
             # Ask for confirmation before triggering LLM tool generation
             short = description[:120] + ("…" if len(description) > 120 else "")
+            token = self._store_callback_payload(
+                ctx,
+                {"kind": "gentool", "description": description},
+            )
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     "✅ Yes, generate it",
-                    callback_data=f"gentool:{description[:200]}",
+                    callback_data=f"gentool_ref:{token}:yes",
                 ),
                 InlineKeyboardButton(
                     "❌ Cancel",
-                    callback_data="gentool:__cancel__",
+                    callback_data=f"gentool_ref:{token}:cancel",
                 ),
             ]])
             await update.message.reply_text(

@@ -683,6 +683,22 @@ class TestCmdCreateTool:
             await bot._cmd_create_tool(update, _ctx(args=["port", "scanner"]))
         _assert_replied(update)
 
+    @pytest.mark.asyncio
+    async def test_with_description_uses_tokenized_callback_payload(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update()
+        ctx = _ctx(args=["port", "scanner"])
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH):
+            await bot._cmd_create_tool(update, ctx)
+
+        kwargs = update.message.reply_text.call_args.kwargs
+        kb = kwargs["reply_markup"]
+        yes_cb = kb.inline_keyboard[0][0].callback_data
+        no_cb = kb.inline_keyboard[0][1].callback_data
+        assert yes_cb.startswith("gentool_ref:")
+        assert no_cb.startswith("gentool_ref:")
+        assert "port scanner" not in yes_cb
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # /create_agent
@@ -873,6 +889,40 @@ class TestNaturalLanguageRouting:
         with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH):
             await bot._handle_message(update, _ctx())
         _assert_auth_error(update)
+
+    @pytest.mark.asyncio
+    async def test_question_like_action_prefers_chat(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update("can you create a tool to scan ports?")
+        ctx = _ctx()
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH), \
+             patch.object(bot, "_classify_intent", new_callable=AsyncMock, return_value={
+                 "intent": "create_tool", "arg": "scan ports", "confidence": 0.72
+             }), \
+             patch.object(bot, "_nlp_chat", new_callable=AsyncMock, return_value="Sure, here is how."), \
+             patch.object(bot, "_nlp_create_tool", new_callable=AsyncMock) as mock_create_tool:
+            await bot._handle_message(update, ctx)
+
+        mock_create_tool.assert_not_called()
+        _assert_replied(update)
+
+    @pytest.mark.asyncio
+    async def test_low_confidence_clarification_uses_tokenized_callbacks(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update("maybe run something")
+        ctx = _ctx()
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH), \
+             patch.object(bot, "_classify_intent", new_callable=AsyncMock, return_value={
+                 "intent": "swarm_task", "arg": "maybe run something", "confidence": 0.35
+             }):
+            await bot._handle_message(update, ctx)
+
+        kwargs = update.message.reply_text.call_args.kwargs
+        kb = kwargs["reply_markup"]
+        yes_cb = kb.inline_keyboard[0][0].callback_data
+        chat_cb = kb.inline_keyboard[0][1].callback_data
+        assert yes_cb.startswith("confirm_ref:")
+        assert chat_cb.startswith("confirm_ref:")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
