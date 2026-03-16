@@ -138,7 +138,7 @@ class BehaviorTracker:
         # 4. Auto-activate plugins based on usage
         if self._plugin_manager:
             stats = await self._store.get_stats(profile.user_id)
-            new_plugins = await self._plugin_manager.check_auto_activate(profile, stats)
+            new_plugins = self._plugin_manager.check_auto_activate(profile, stats)
             for plugin_id, plugin_name in new_plugins:
                 if plugin_id not in profile.active_plugins:
                     profile.active_plugins.append(plugin_id)

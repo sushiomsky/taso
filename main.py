@@ -23,17 +23,9 @@ from orchestrator import Orchestrator
 
 
 def main() -> None:
+    """Initialize and run the orchestrator."""
     orchestrator = Orchestrator()
-    try:
-        asyncio.run(orchestrator.run())
-    except KeyboardInterrupt:
-        print("\nOperation cancelled by user. Exiting gracefully.")
-    except asyncio.CancelledError:
-        print("\nAsync operation cancelled. Exiting gracefully.")
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-    finally:
-        print("TASO has been stopped.")
+    asyncio.run(orchestrator.run())
 
 
 if __name__ == "__main__":
@@ -41,7 +33,7 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nStartup interrupted by user. Exiting.")
-        sys.exit(1)
+        sys.exit(0)
     except Exception as e:
         print(f"Critical error during startup: {e}")
         sys.exit(1)

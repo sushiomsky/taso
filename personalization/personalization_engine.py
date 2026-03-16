@@ -29,8 +29,8 @@ class PersonalizedContext:
     profile: UserProfile
     # Combined fast-path patterns: global + plugin + learned shortcuts
     extra_fast_patterns: List[tuple] = field(default_factory=list)
-    # Extra text to append to LLM system prompts
-    response_hints: str = ""
+    # Extra lines to append to LLM system prompts
+    response_hints: List[str] = field(default_factory=list)
     # Notifications to deliver to the user after the main response
     notifications: List[str] = field(default_factory=list)
 

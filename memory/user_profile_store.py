@@ -33,21 +33,43 @@ MAX_EVENTS_PER_USER = 500
 class UserProfile:
     """In-memory view of one user's profile."""
 
-    def __init__(self, row: dict) -> None:
-        self.user_id: int = row["user_id"]
-        self.username: str = row.get("username") or ""
-        self.first_name: str = row.get("first_name") or ""
+    def __init__(self, row: Optional[dict] = None, **kwargs: Any) -> None:
+        data: Dict[str, Any] = dict(row or {})
+        if kwargs:
+            data.update(kwargs)
+
+        self.user_id: int = int(data.get("user_id", 0))
+        self.username: str = data.get("username") or ""
+        self.first_name: str = data.get("first_name") or ""
         # "concise" | "detailed" | "technical" | "casual" — detected from usage
-        self.response_style: str = row.get("response_style") or "balanced"
+        self.response_style: str = data.get("response_style") or "balanced"
         # List of plugin IDs currently active for this user
-        self.active_plugins: List[str] = json.loads(row.get("active_plugins") or "[]")
+        active_plugins = data.get("active_plugins") or []
+        if isinstance(active_plugins, str):
+            try:
+                active_plugins = json.loads(active_plugins)
+            except json.JSONDecodeError:
+                active_plugins = []
+        self.active_plugins: List[str] = list(active_plugins)
         # User-specific shortcut phrases → intent mappings
         # e.g. {"check everything": "status", "my scanner": "security_scan"}
-        self.learned_shortcuts: Dict[str, str] = json.loads(row.get("learned_shortcuts") or "{}")
+        learned_shortcuts = data.get("learned_shortcuts") or {}
+        if isinstance(learned_shortcuts, str):
+            try:
+                learned_shortcuts = json.loads(learned_shortcuts)
+            except json.JSONDecodeError:
+                learned_shortcuts = {}
+        self.learned_shortcuts: Dict[str, str] = dict(learned_shortcuts)
         # Arbitrary metadata blob (power_user flag, onboarding_done, etc.)
-        self.metadata: Dict[str, Any] = json.loads(row.get("metadata") or "{}")
-        self.created_at: str = row.get("created_at") or ""
-        self.updated_at: str = row.get("updated_at") or ""
+        metadata = data.get("metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except json.JSONDecodeError:
+                metadata = {}
+        self.metadata: Dict[str, Any] = dict(metadata)
+        self.created_at: str = data.get("created_at") or ""
+        self.updated_at: str = data.get("updated_at") or ""
 
     # ------------------------------------------------------------------
     # Convenience helpers
@@ -232,11 +254,17 @@ class UserProfileStore:
         rows = await cur.fetchall()
         return {r["key"]: r["count"] for r in rows}
 
-    async def get_top_intents(self, user_id: int, n: int = 5) -> List[str]:
-        """Return the n most-used intents for a user."""
+    async def get_top_intents(
+        self,
+        user_id: int,
+        n: int = 5,
+        limit: Optional[int] = None,
+    ) -> List[str]:
+        """Return the top intents for a user (supports legacy `limit` alias)."""
+        top_n = limit if limit is not None else n
         stats = await self.get_stats(user_id)
         intents = {k[len("intent:"):]: v for k, v in stats.items() if k.startswith("intent:")}
-        return sorted(intents, key=lambda x: intents[x], reverse=True)[:n]
+        return sorted(intents, key=lambda x: intents[x], reverse=True)[:top_n]
 
     async def get_recent_events(self, user_id: int, limit: int = 20) -> List[Dict]:
         cur = await self._db.execute(

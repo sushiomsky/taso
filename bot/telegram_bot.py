@@ -656,12 +656,37 @@ class TelegramBot:
             await update.message.reply_text("Usage: /run\\_swarm\\_task <your task description>")
             return
         await update.message.reply_text(f"🐝 Swarm executing: _{request[:60]}_…", parse_mode="Markdown")
+
+        # Prefer coordinator dispatch first (easy to mock in tests and consistent with command routing).
+        dispatched: Dict[str, Any] = {}
+        try:
+            dispatched = await self._dispatch_task("swarm_task", {"task": request}, update)
+        except Exception as exc:
+            log.warning(f"Swarm dispatch fallback triggered: {exc}")
+            dispatched = {"error": str(exc)}
+
+        result_text = dispatched.get("result")
+        task_id = dispatched.get("task_id")
+        if result_text is not None or task_id:
+            if isinstance(result_text, (dict, list)):
+                result_text = json.dumps(result_text, indent=2)
+            result_text = str(result_text or "Queued")
+            if task_id:
+                result_text += f"\n\nTask ID: {task_id}"
+            if len(result_text) > 3800:
+                result_text = result_text[:3800] + "\n…[truncated]"
+            await update.message.reply_text(f"✅ *Swarm result:*\n\n{result_text}", parse_mode="Markdown")
+            return
+
+        # Fallback to direct swarm execution if no routed result was produced.
         try:
             from swarm.swarm_orchestrator import swarm_orchestrator
-            result = await swarm_orchestrator.run(request)
+            result = await asyncio.wait_for(swarm_orchestrator.run(request), timeout=120.0)
             if len(result) > 3800:
                 result = result[:3800] + "\n…[truncated]"
             await update.message.reply_text(f"✅ *Swarm result:*\n\n{result}", parse_mode="Markdown")
+        except asyncio.TimeoutError:
+            await update.message.reply_text("⏱️ Swarm task timed out before completion.")
         except Exception as exc:
             await update.message.reply_text(f"❌ Swarm error: {exc}")
 
@@ -1310,7 +1335,13 @@ class TelegramBot:
             "When the user seems to want to trigger an action (scan, search, generate), "
             "remind them they can describe it in plain English."
         )
-        hints = ctx.user_data.get("_persona_hints", [])
+        raw_hints = ctx.user_data.get("_persona_hints", [])
+        if isinstance(raw_hints, str):
+            hints = [raw_hints] if raw_hints else []
+        elif isinstance(raw_hints, list):
+            hints = [str(h) for h in raw_hints if h]
+        else:
+            hints = [str(raw_hints)] if raw_hints else []
         if hints:
             system += "\n\n" + "\n".join(hints)
         if context_parts:

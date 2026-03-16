@@ -205,8 +205,13 @@ class MonitoringAgent(BaseAgent):
 
     def _check_thresholds(self, snap: Dict) -> None:
         """Emit an internal alert if resource usage is critical."""
+        if not hasattr(self, "_last_alert") or self._last_alert is None:
+            self._last_alert = {}
+        if not hasattr(self, "_alerts") or self._alerts is None:
+            self._alerts = []
+
         thresholds = [
-            ("cpu_pct",  96, "CPU usage critical"),
+            ("cpu_pct",  95, "CPU usage critical"),
             ("mem_pct",  95, "Memory usage critical"),
             ("disk_pct", 95, "Disk usage critical"),
         ]
@@ -219,7 +224,7 @@ class MonitoringAgent(BaseAgent):
                     continue
                 self._last_alert[key] = now
                 self._alerts.append({
-                    "ts":      snap["ts"],
+                    "ts":      snap.get("ts", now),
                     "source":  "monitoring_agent",
                     "message": f"{msg}: {val}%",
                     "level":   "critical",

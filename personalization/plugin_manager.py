@@ -174,24 +174,39 @@ class PluginManager:
     # Auto-activation
     # ------------------------------------------------------------------
 
-    async def check_auto_activate(
+    def check_auto_activate(
         self,
-        profile: "UserProfile",
-        stats: Dict[str, int],
+        profile_or_stats: "UserProfile" | Dict[str, int],
+        stats_or_active: Dict[str, int] | List[str] | None = None,
     ) -> List[Tuple[str, str]]:
         """
-        Check all plugins against the user's stats and return a list of
-        (plugin_id, plugin_name) for newly qualifying plugins.
+        Check all plugins for auto-activation candidates.
+
+        Supports two call styles for backward compatibility:
+        1) check_auto_activate(profile, stats) -> current flow
+        2) check_auto_activate(stats, active_plugin_ids) -> legacy/tests
         """
         newly_activated: List[Tuple[str, str]] = []
+        if isinstance(profile_or_stats, dict):
+            profile = None
+            stats = profile_or_stats
+            active_plugins = list(stats_or_active or [])
+        else:
+            profile = profile_or_stats
+            stats = stats_or_active if isinstance(stats_or_active, dict) else {}
+            active_plugins = profile.active_plugins
+
         for plugin in BUILTIN_PLUGINS:
-            if plugin.id in profile.active_plugins:
+            if plugin.id in active_plugins:
                 continue  # already active
             if not plugin.auto_activate_rules:
                 continue  # manual-only (power_user is handled by BehaviorTracker)
             if all(stats.get(k, 0) >= v for k, v in plugin.auto_activate_rules.items()):
                 newly_activated.append((plugin.id, plugin.name))
-                log.info(f"Auto-activating plugin '{plugin.id}' for user {profile.user_id}")
+                if profile is not None:
+                    log.info(f"Auto-activating plugin '{plugin.id}' for user {profile.user_id}")
+                else:
+                    log.info(f"Auto-activating plugin '{plugin.id}'")
         return newly_activated
 
     # ------------------------------------------------------------------
@@ -205,8 +220,8 @@ class PluginManager:
             patterns.extend(plugin.fast_patterns)
         return patterns
 
-    def build_response_hints(self, active_plugin_ids: List[str], style: str) -> str:
-        """Build extra system-prompt text from active plugins + response style."""
+    def build_response_hints(self, active_plugin_ids: List[str], style: str) -> List[str]:
+        """Build system-prompt hint lines from active plugins + response style."""
         hints: List[str] = []
 
         style_hints = {
@@ -223,7 +238,7 @@ class PluginManager:
             if plugin.response_hints:
                 hints.append(plugin.response_hints)
 
-        return "\n".join(hints)
+        return hints
 
     def build_shortcut_fast_paths(
         self, learned_shortcuts: Dict[str, str]
@@ -264,9 +279,10 @@ class PluginManager:
         }.get(profile.response_style, profile.response_style)
 
         power = "🏅 Power User" if profile.is_power_user() else f"({profile.total_interactions()} interactions)"
+        identity = profile.first_name or profile.username or f"user {profile.user_id}"
 
         return (
-            f"👤 *Your TASO Profile* {power}\n\n"
+            f"👤 *Your TASO Profile* — {identity} {power}\n\n"
             f"🎨 *Response style:* {style_label}\n\n"
             f"🔌 *Active plugins ({len(active)}):*\n{plugin_lines}\n\n"
             f"📊 *Top commands:*\n{usage_lines}\n\n"
