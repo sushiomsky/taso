@@ -32,6 +32,18 @@ if TYPE_CHECKING:
 log = get_logger("plugin_manager")
 
 
+def _escape_markdown(text: object) -> str:
+    """Escape user-facing text for Telegram Markdown (v1)."""
+    value = str(text)
+    value = value.replace("\\", "\\\\")
+    return re.sub(r"([_*`\[])", r"\\\1", value)
+
+
+def _sanitize_inline_code(text: object) -> str:
+    """Keep inline-code tokens safe and single-line."""
+    return str(text).replace("`", "'").replace("\n", " ").replace("\r", " ")
+
+
 @dataclass
 class Plugin:
     id: str
@@ -254,7 +266,8 @@ class PluginManager:
         """Format a user-facing profile summary."""
         active = self.get_active(profile.active_plugins)
         plugin_lines = "\n".join(
-            f"  {p.icon} *{p.name}* — {p.description}" for p in active
+            f"  {p.icon} *{_escape_markdown(p.name)}* — {_escape_markdown(p.description)}"
+            for p in active
         ) or "  _None yet — keep using TASO to unlock plugins!_"
 
         top_intents = sorted(
@@ -262,12 +275,12 @@ class PluginManager:
             key=lambda x: x[1], reverse=True,
         )[:5]
         usage_lines = "\n".join(
-            f"  • `{intent}` × {count}" for intent, count in top_intents
+            f"  • `{_sanitize_inline_code(intent)}` × {count}" for intent, count in top_intents
         ) or "  _No data yet_"
 
         shortcuts = profile.learned_shortcuts
         shortcut_lines = "\n".join(
-            f"  • \"{phrase}\" → `{intent}`"
+            f"  • \"{_escape_markdown(phrase)}\" → `{_sanitize_inline_code(intent)}`"
             for phrase, intent in list(shortcuts.items())[:8]
         ) or "  _None learned yet_"
 
@@ -282,8 +295,8 @@ class PluginManager:
         identity = profile.first_name or profile.username or f"user {profile.user_id}"
 
         return (
-            f"👤 *Your TASO Profile* — {identity} {power}\n\n"
-            f"🎨 *Response style:* {style_label}\n\n"
+            f"👤 *Your TASO Profile* — {_escape_markdown(identity)} {_escape_markdown(power)}\n\n"
+            f"🎨 *Response style:* {_escape_markdown(style_label)}\n\n"
             f"🔌 *Active plugins ({len(active)}):*\n{plugin_lines}\n\n"
             f"📊 *Top commands:*\n{usage_lines}\n\n"
             f"⚡ *Learned shortcuts:*\n{shortcut_lines}"

@@ -180,6 +180,24 @@ class TestPluginManager:
         assert "Alice" in summary or "alice" in summary
         assert "developer" in summary.lower() or "plugin" in summary.lower()
 
+    def test_format_profile_summary_escapes_markdown_identity_and_shortcuts(self):
+        from memory.user_profile_store import UserProfile
+        profile = UserProfile(
+            user_id=7,
+            username="a_b",
+            first_name="A_*[`",
+            response_style="technical",
+            active_plugins=[],
+            learned_shortcuts={"scan_[all]": "security`scan"},
+            metadata={},
+            created_at="now",
+            updated_at="now",
+        )
+        summary = self.pm.format_profile_summary(profile, {})
+        assert "A\\_\\*\\[\\`" in summary
+        assert "scan\\_\\[all]" in summary
+        assert "`security'scan`" in summary
+
     def test_check_auto_activate_threshold_not_met(self):
         """Should not activate when usage below threshold."""
         stats = {"intent:security_scan": 1}  # below typical threshold

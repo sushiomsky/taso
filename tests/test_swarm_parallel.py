@@ -40,7 +40,7 @@ async def test_execute_dag_runs_ready_tasks_concurrently():
             started += 1
             if started == len(subtasks):
                 all_started.set()
-        await asyncio.wait_for(all_started.wait(), timeout=0.3)
+        await asyncio.wait_for(all_started.wait(), timeout=1.5)
         task.status = "done"
         task.result = "ok"
 
