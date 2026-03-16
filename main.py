@@ -25,7 +25,11 @@ from orchestrator import Orchestrator
 def main() -> None:
     """Initialize and run the orchestrator."""
     orchestrator = Orchestrator()
-    asyncio.run(orchestrator.run())
+    try:
+        asyncio.run(orchestrator.run())
+    except KeyboardInterrupt:
+        # run() performs forced cleanup in its finally block on interrupted startup.
+        raise
 
 
 if __name__ == "__main__":
