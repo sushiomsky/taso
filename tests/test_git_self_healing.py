@@ -519,3 +519,65 @@ class TestDeployManagerHealthIntegration:
                     ok = False
         # Either ok or gracefully returns False; main goal is no unhandled exception
         assert ok in (True, False)
+
+    @pytest.mark.asyncio
+    async def test_run_all_tests_runs_pytest_and_health(self):
+        """_run_all_tests executes syntax, pytest, health, then smoke checks."""
+        from self_healing.deploy_manager import DeployManager
+        dm = DeployManager()
+
+        mock_report = MagicMock()
+        mock_report.passed = True
+        mock_report.failed_checks = []
+
+        with patch("self_healing.deploy_manager.run_syntax_check", new_callable=AsyncMock) as sc, \
+             patch("self_healing.deploy_manager.run_pytest", new_callable=AsyncMock) as pt, \
+             patch("self_healing.deploy_manager.run_smoke_test", new_callable=AsyncMock) as sm, \
+             patch("self_healing.health_checker.health_checker") as hc_mod:
+            sc.return_value = (True, "syntax ok")
+            pt.return_value = (True, "250 passed")
+            sm.return_value = (True, "smoke ok")
+            hc_mod.check_all = AsyncMock(return_value=mock_report)
+
+            ok = await dm._run_all_tests()
+
+        assert ok is True
+        hc_mod.check_all.assert_called_once_with(quick=True)
+
+    @pytest.mark.asyncio
+    async def test_run_all_tests_stops_on_pytest_failure(self):
+        """_run_all_tests fails early when pytest fails."""
+        from self_healing.deploy_manager import DeployManager
+        dm = DeployManager()
+
+        with patch("self_healing.deploy_manager.run_syntax_check", new_callable=AsyncMock) as sc, \
+             patch("self_healing.deploy_manager.run_pytest", new_callable=AsyncMock) as pt, \
+             patch("self_healing.health_checker.health_checker") as hc_mod:
+            sc.return_value = (True, "syntax ok")
+            pt.return_value = (False, "2 failed")
+            hc_mod.check_all = AsyncMock()
+
+            ok = await dm._run_all_tests()
+
+        assert ok is False
+        hc_mod.check_all.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_safe_git_tag_propagates_failure(self):
+        """_safe_git_tag returns False when git_tag fails."""
+        from self_healing.deploy_manager import DeployManager
+        dm = DeployManager()
+        with patch("self_healing.deploy_manager.git_tag", new_callable=AsyncMock) as gt:
+            gt.return_value = False
+            ok = await dm._safe_git_tag("v1", "msg")
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_safe_git_push_propagates_failure(self):
+        """_safe_git_push returns False when git_push fails."""
+        from self_healing.deploy_manager import DeployManager
+        dm = DeployManager()
+        with patch("self_healing.deploy_manager.git_push", new_callable=AsyncMock) as gp:
+            gp.return_value = False
+            ok = await dm._safe_git_push()
+        assert ok is False

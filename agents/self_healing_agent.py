@@ -67,6 +67,8 @@ class SelfHealingAgent(BaseAgent):
             log.error(f"Error handling critical error: {e}", exc_info=True)
 
     async def _commit_push(self, message: str, version_id: str) -> str:
+        audit_ok = False
+        audit_detail = ""
         try:
             from self_healing.deploy_manager import deploy_manager
             from self_healing.version_manager import version_manager
@@ -82,11 +84,22 @@ class SelfHealingAgent(BaseAgent):
                 rec = version_manager.get(version_id)
                 if rec:
                     await version_history_db.log_version(rec)
+                audit_ok = True
+                audit_detail = f"sha={sha[:12]}"
                 return f"✅ Committed & pushed: {sha[:12]} — {message[:50]}"
+            audit_detail = "commit_and_push returned no sha"
             return "❌ Commit/push failed — check logs."
         except Exception as e:
             log.error(f"Error during commit and push: {e}", exc_info=True)
+            audit_detail = str(e)
             return f"❌ Commit/push failed due to an error: {e}"
+        finally:
+            await self._audit_patch_attempt(
+                message=message,
+                version_id=version_id,
+                success=audit_ok,
+                detail=audit_detail,
+            )
 
     async def _rollback(self, reason: str, target_sha: Optional[str] = None) -> str:
         try:
@@ -135,6 +148,29 @@ class SelfHealingAgent(BaseAgent):
         except Exception as e:
             log.error(f"Error handling status request: {e}", exc_info=True)
             return f"❌ Error handling status request: {e}"
+
+    async def _audit_patch_attempt(
+        self,
+        message: str,
+        version_id: str,
+        success: bool,
+        detail: str,
+    ) -> None:
+        """Record every self-healing patch commit attempt in AuditLog."""
+        try:
+            from memory.audit_log import audit_log
+            await audit_log.connect()
+            await audit_log.record(
+                agent=self.name,
+                action="commit_and_push",
+                input_summary=f"version_id={version_id}; message={message[:200]}",
+                output_summary=detail[:512],
+                success=success,
+                error=None if success else detail[:512],
+                metadata={"version_id": version_id},
+            )
+        except Exception as exc:
+            log.warning(f"SelfHealingAgent audit logging failed: {exc}")
 
 
 async def _version_history_db_log_rollback(reason: str, sha: str) -> None:

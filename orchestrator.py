@@ -43,6 +43,7 @@ class Orchestrator:
             tool_registry = self._initialize_tool_registry()
             agents = await self._start_agents(bus, db, vector, conv_store)
             await self._initialize_optional_features(agents, bus, db, conv_store)
+            await self._run_startup_health_check()
             bot = await self._start_telegram_bot(bus, agents, tool_registry, conv_store)
             await self._start_log_monitor(bot)
 
@@ -196,6 +197,27 @@ class Orchestrator:
             return
         asyncio.create_task(self._log_monitor_loop(bot))
         log.info("Log monitor background task scheduled.")
+
+    async def _run_startup_health_check(self) -> bool:
+        """
+        Run a quick startup health check and log the outcome.
+        Non-fatal: startup continues even when checks fail.
+        """
+        try:
+            from self_healing.health_checker import health_checker
+            report = await health_checker.check_all(quick=True)
+            if report.passed:
+                log.info(f"Startup health check passed in {report.duration()}s.")
+                return True
+
+            log.warning(
+                "Startup health check failed (continuing startup): "
+                + ", ".join(report.failed_checks)
+            )
+            return False
+        except Exception as exc:
+            log.warning(f"Startup health check unavailable: {exc}")
+            return False
 
     async def _log_monitor_loop(self, bot=None) -> None:
         """Every 5 minutes check for new errors and alert admin."""

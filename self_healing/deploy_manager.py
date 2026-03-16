@@ -12,7 +12,7 @@ from typing import Optional
 from config.logging_config import get_logger
 from config.settings import settings
 from self_healing.git_manager import git_pull, git_current_sha, git_commit, git_tag, git_push
-from self_healing.test_runner import run_smoke_test, run_syntax_check
+from self_healing.test_runner import run_smoke_test, run_syntax_check, run_pytest
 from self_healing.rollback_manager import rollback_manager
 from self_healing.version_tagger import version_tagger
 
@@ -117,12 +117,24 @@ class DeployManager:
 
     async def _run_all_tests(self) -> bool:
         """
-        Runs syntax and smoke tests. Returns True if all tests pass.
+        Runs syntax, pytest, runtime health checks, and smoke tests.
+        Returns True only if all gates pass.
         """
         try:
             passed, output = await run_syntax_check()
             if not passed:
                 log.error(f"Syntax check failed:\n{output}")
+                return False
+
+            passed, output = await run_pytest()
+            if not passed:
+                log.error(f"Pytest failed:\n{output[-1000:]}")
+                return False
+
+            from self_healing.health_checker import health_checker
+            report = await health_checker.check_all(quick=True)
+            if not report.passed:
+                log.error(f"Health checks failed before commit: {report.failed_checks}")
                 return False
 
             return await self._run_smoke_tests("before commit")
@@ -182,8 +194,7 @@ class DeployManager:
         Returns True if successful, False otherwise.
         """
         try:
-            await git_tag(version_id, tag_message)
-            return True
+            return await git_tag(version_id, tag_message)
         except Exception as e:
             log.exception(f"Git tag failed: {e}")
             return False
@@ -194,8 +205,7 @@ class DeployManager:
         Returns True if successful, False otherwise.
         """
         try:
-            await git_push()
-            return True
+            return await git_push()
         except Exception as e:
             log.exception(f"Git push failed: {e}")
             return False
