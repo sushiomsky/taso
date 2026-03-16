@@ -198,7 +198,9 @@ class ModelRouter:
 
     def _get_primary_model(self, task_type: TaskType) -> Optional[ModelEntry]:
         """Resolve the primary model for a task type and active backend."""
-        if task_type == TaskType.GENERAL:
+        # Keep chat-first uncensored behavior only for Ollama backend;
+        # other backends should honor their configured primary model.
+        if task_type == TaskType.GENERAL and settings.LLM_BACKEND == "ollama":
             uncensored = self._reg.uncensored_model()
             if uncensored and uncensored.available:
                 return uncensored

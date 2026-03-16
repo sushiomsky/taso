@@ -421,6 +421,19 @@ class TestCmdRunSwarmTask:
         assert "dispatch error" in text.lower()
         mock_swarm.run.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_routed_error_payload_returns_error_not_success(self, bot_instance):
+        bot, *_ = bot_instance
+        update = _make_update()
+        with patch.multiple("bot.telegram_bot.settings", **_SETTINGS_PATCH), \
+             _patch_dispatch(bot, {"result": {"error": "agent refused"}, "task_id": "t-err-1"}):
+            await bot._cmd_run_swarm_task(update, _ctx(args=["scan", "CVEs"]))
+
+        text = _replied(update).lower()
+        assert "swarm error" in text
+        assert "agent refused" in text
+        assert "task id: t-err-1" in text
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # /model_router

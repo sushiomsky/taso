@@ -673,6 +673,13 @@ class TelegramBot:
             await update.message.reply_text(f"❌ Swarm dispatch error: {dispatch_error}")
             return
 
+        if isinstance(result_text, dict) and result_text.get("error"):
+            error_text = str(result_text["error"])
+            if task_id:
+                error_text += f"\n\nTask ID: {task_id}"
+            await update.message.reply_text(f"❌ Swarm error:\n\n{error_text}")
+            return
+
         if result_text is not None or task_id:
             if isinstance(result_text, (dict, list)):
                 result_text = json.dumps(result_text, indent=2)

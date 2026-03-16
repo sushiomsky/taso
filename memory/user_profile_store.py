@@ -38,7 +38,10 @@ class UserProfile:
         if kwargs:
             data.update(kwargs)
 
-        self.user_id: int = int(data.get("user_id", 0))
+        try:
+            self.user_id = int(data.get("user_id") or 0)
+        except (TypeError, ValueError):
+            self.user_id = 0
         self.username: str = data.get("username") or ""
         self.first_name: str = data.get("first_name") or ""
         # "concise" | "detailed" | "technical" | "casual" — detected from usage

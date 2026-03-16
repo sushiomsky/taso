@@ -53,3 +53,40 @@ class TestOrchestratorStartupHealth:
             ok = await orch._run_startup_health_check()
 
         assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_run_cleans_up_on_keyboard_interrupt(self):
+        from orchestrator import Orchestrator
+
+        orch = Orchestrator()
+        bus = MagicMock()
+        bus.stop = AsyncMock()
+        db = MagicMock()
+        db.close = AsyncMock()
+        conv_store = MagicMock()
+        conv_store.close = AsyncMock()
+        bot = MagicMock()
+        bot.stop = AsyncMock()
+        agent = MagicMock()
+        agent.name = "agent-x"
+        agent.stop = AsyncMock()
+
+        with patch("orchestrator.init_logging"), \
+             patch.object(orch, "_log_startup_info"), \
+             patch.object(orch, "_start_message_bus", new_callable=AsyncMock, return_value=bus), \
+             patch.object(orch, "_initialize_memory_subsystem", new_callable=AsyncMock, return_value=(db, MagicMock(), conv_store)), \
+             patch.object(orch, "_initialize_tool_registry", return_value=MagicMock()), \
+             patch.object(orch, "_start_agents", new_callable=AsyncMock, return_value=[agent]), \
+             patch.object(orch, "_initialize_optional_features", new_callable=AsyncMock), \
+             patch.object(orch, "_run_startup_health_check", new_callable=AsyncMock, return_value=True), \
+             patch.object(orch, "_start_telegram_bot", new_callable=AsyncMock, return_value=bot), \
+             patch.object(orch, "_start_log_monitor", new_callable=AsyncMock), \
+             patch.object(orch, "_wait_for_shutdown", new_callable=AsyncMock, side_effect=KeyboardInterrupt()):
+            with pytest.raises(KeyboardInterrupt):
+                await orch.run()
+
+        bot.stop.assert_called_once()
+        agent.stop.assert_called_once()
+        bus.stop.assert_called_once()
+        db.close.assert_called_once()
+        conv_store.close.assert_called_once()

@@ -56,6 +56,11 @@ class TestUserProfileStore:
         p2 = run(store.get_or_create(99, "u", "U"))
         assert p1.user_id == p2.user_id
 
+    def test_user_profile_invalid_user_id_falls_back_to_zero(self):
+        from memory.user_profile_store import UserProfile
+        profile = UserProfile(user_id="not-a-number")
+        assert profile.user_id == 0
+
     def test_save_and_reload(self):
         store = self._make_store()
         profile = run(store.get_or_create(42, "bob", "Bob"))

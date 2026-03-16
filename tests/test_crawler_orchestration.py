@@ -25,7 +25,7 @@ async def test_onion_process_discovered_onions_registers_and_queues():
 
     db.register_onion.assert_called_once()
     db.enqueue.assert_called_once()
-    args, kwargs = db.enqueue.call_args
+    args, _kwargs = db.enqueue.call_args
     assert "exampleexample.onion" in args[0]
 
 

@@ -57,3 +57,4 @@ async def test_commit_push_failure_writes_audit():
     al.record.assert_called_once()
     kwargs = al.record.call_args.kwargs
     assert kwargs["success"] is False
+    assert kwargs["action"] == "commit_and_push"

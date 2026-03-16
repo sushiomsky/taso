@@ -33,6 +33,12 @@ class Orchestrator:
 
     async def run(self) -> None:
         """Main entry point – initialise everything and run until shutdown."""
+        bus = None
+        db = None
+        conv_store = None
+        bot = None
+        agents = []
+        shutdown_complete = False
         try:
             init_logging()
             self._log_startup_info()
@@ -52,10 +58,18 @@ class Orchestrator:
 
             # Perform graceful shutdown
             await self._shutdown(bot, agents, bus, db, conv_store)
+            shutdown_complete = True
 
         except Exception as exc:
             log.error(f"Critical error during orchestrator run: {exc}", exc_info=True)
             raise
+        finally:
+            if not shutdown_complete and any([bot, agents, bus, db, conv_store]):
+                try:
+                    await self._shutdown(bot, agents, bus, db, conv_store)
+                except Exception as exc:
+                    log.error(f"Error during forced shutdown cleanup: {exc}", exc_info=True)
+            self._running = False
 
     def _log_startup_info(self) -> None:
         """Log startup information."""
@@ -285,31 +299,35 @@ class Orchestrator:
     async def _shutdown(self, bot, agents, bus, db, conv_store):
         """Perform a graceful shutdown of all components."""
         log.info("Shutting down TASO…")
-        try:
-            await bot.stop()
-        except Exception as exc:
-            log.error(f"Error stopping Telegram bot: {exc}", exc_info=True)
+        if bot is not None:
+            try:
+                await bot.stop()
+            except Exception as exc:
+                log.error(f"Error stopping Telegram bot: {exc}", exc_info=True)
 
-        for agent in reversed(agents):
+        for agent in reversed(agents or []):
             try:
                 await agent.stop()
             except Exception as exc:
                 log.error(f"Error stopping agent {agent.name}: {exc}", exc_info=True)
 
-        try:
-            await bus.stop()
-        except Exception as exc:
-            log.error(f"Error stopping message bus: {exc}", exc_info=True)
+        if bus is not None:
+            try:
+                await bus.stop()
+            except Exception as exc:
+                log.error(f"Error stopping message bus: {exc}", exc_info=True)
 
-        try:
-            await db.close()
-        except Exception as exc:
-            log.error(f"Error closing knowledge database: {exc}", exc_info=True)
+        if db is not None:
+            try:
+                await db.close()
+            except Exception as exc:
+                log.error(f"Error closing knowledge database: {exc}", exc_info=True)
 
-        try:
-            await conv_store.close()
-        except Exception as exc:
-            log.error(f"Error closing conversation store: {exc}", exc_info=True)
+        if conv_store is not None:
+            try:
+                await conv_store.close()
+            except Exception as exc:
+                log.error(f"Error closing conversation store: {exc}", exc_info=True)
 
         log.info("TASO shutdown complete.")
 

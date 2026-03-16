@@ -253,12 +253,11 @@ class ClearnetCrawler:
 
         async with self._lock:
             cached = self._robots_cache.get(base)
-
-        if cached and (now - cached[0]) < ROBOTS_CACHE_TTL:
-            try:
-                return cached[1].can_fetch(HEADERS["User-Agent"], url)
-            except Exception:
-                return True
+            if cached and (now - cached[0]) < ROBOTS_CACHE_TTL:
+                try:
+                    return cached[1].can_fetch(HEADERS["User-Agent"], url)
+                except Exception:
+                    return True
 
         rp = robotparser.RobotFileParser()
         rp.set_url(f"{base}/robots.txt")
